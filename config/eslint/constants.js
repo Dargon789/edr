@@ -1,5 +1,5 @@
 module.exports.slowImportsCommonIgnoredModules = [
-  "picocolors",
+  "chalk",
   "debug",
   "find-up",
   "fs-extra",

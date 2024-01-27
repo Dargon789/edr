@@ -1,7 +1,5 @@
 import type EthersT from "ethers";
 
-import { tryDereference } from "./typed";
-
 export function supportAddressable(
   Assertion: Chai.AssertionStatic,
   chaiUtils: Chai.ChaiUtils
@@ -29,13 +27,10 @@ function override(
 // otherwise undefined is returned.
 function tryGetAddressSync(value: any): string | undefined {
   const { isAddress, isAddressable } = require("ethers") as typeof EthersT;
-
-  value = tryDereference(value, "address");
-  if (isAddressable(value)) {
-    value = (value as any).address ?? (value as any).target;
-  }
   if (isAddress(value)) {
     return value;
+  } else if (isAddressable(value)) {
+    return tryGetAddressSync((value as any).address ?? (value as any).target);
   } else {
     return undefined;
   }
