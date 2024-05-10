@@ -1,6 +1,7 @@
-export type { ErrorDescriptor } from "./descriptors.js";
-export {
-  HardhatError,
-  HardhatPluginError,
-  assertHardhatInvariant,
-} from "./errors.js";
+export function foo() {
+  return "foo";
+}
+
+export function bar() {
+  return "bar";
+}
