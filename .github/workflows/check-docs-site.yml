@@ -1,13 +1,10 @@
-name: Lint
+name: Check Docs Site
 
 on:
   push:
-    branches: [main]
-  pull_request:
     branches:
       - "**"
     paths:
-      - "*"
       - "docs/**"
       - "packages/**"
   workflow_dispatch:
@@ -17,8 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint:
-    name: Lint
+  check:
+    name: Check docs site
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
@@ -29,20 +26,11 @@ jobs:
         with:
           node-version: 18
           cache: "pnpm"
-          cache-dependency-path: |
-            pnpm-lock.yaml
-            docs/pnpm-lock.yaml
       - name: Install
         run: pnpm install --frozen-lockfile --prefer-offline
-      - name: Build
-        run: pnpm build
+      - name: Install Docs
+        run: cd docs && pnpm install --frozen-lockfile --prefer-offline
       - name: lint
-        run: pnpm lint
-      - name: Check dependency versions
-        run: node scripts/check-dependencies.js
-      - name: Install website
-        working-directory: docs/
-        run: pnpm install --frozen-lockfile --prefer-offline
-      - name: Lint website
-        working-directory: docs/
-        run: pnpm lint
+        run: cd docs && pnpm lint
+      - name: Build
+        run: cd docs && pnpm build
