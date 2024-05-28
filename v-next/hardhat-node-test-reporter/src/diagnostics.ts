@@ -1,4 +1,4 @@
-import type { TestEventData } from "./types.js";
+import { TestEventData } from "./types.js";
 
 export interface GlobalDiagnostics {
   tests: number;
@@ -8,18 +8,10 @@ export interface GlobalDiagnostics {
   cancelled: number;
   skipped: number;
   todo: number;
-  // eslint-disable-next-line @typescript-eslint/naming-convention -- keeping this alingned with the node:test event
+  // eslint-disable-next-line @typescript-eslint/naming-convention
   duration_ms: number;
 }
 
-/**
- * This function receives all the diagnostics that have been emitted by the test
- * run, and tries to parse a set of well-known global diagnostics that node:test
- * emits to report the overall status of the test run.
- *
- * If the diagnostics are not recognized, or can't be parsed effectively, they
- * are returned as `unsaidDiagnostics`, so that we can print them at the end.
- */
 export function processGlobalDiagnostics(
   diagnostics: Array<TestEventData["test:diagnostic"]>,
 ): {
@@ -50,17 +42,10 @@ export function processGlobalDiagnostics(
       continue;
     }
 
-    /* eslint-disable-next-line @typescript-eslint/consistent-type-assertions --
-    We checked that this is a key of globalDiagnostics */
-    const nameAsKey = name as keyof GlobalDiagnostics;
-
     try {
       const value = parseFloat(numberString);
-
-      globalDiagnostics[nameAsKey] = value;
+      globalDiagnostics[name as keyof GlobalDiagnostics] = value;
     } catch {
-      // If this threw, the format of the diagnostic isn't what we expected,
-      // so we just print it as an unused diagnostic.
       unusedDiagnostics.push(diagnostic);
     }
   }
