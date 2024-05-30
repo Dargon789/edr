@@ -14,49 +14,9 @@ for (const dir of dirs) {
     continue;
   }
 
-  // This config package don't have same scripts.
-  if (dir.name === "config"){
-    continue;
-  }
-
   // The test reporter is a special case, as it doesn't use itself as test
   // reporter
   if (dir.name === "hardhat-node-test-reporter") {
-    continue;
-  }
-
-  // Same with the example project, we don't use the same scripts
-  if (dir.name === "example-project") {
-    continue;
-  }
-
-  // TODO: This is a temporary solution until we convert Ignitions tests
-  // to Node Test Runner.
-  if (dir.name === "hardhat-ignition-core") {
-    continue;
-  }
-
-  // TODO: This is a temporary solution until we convert Ignitions tests
-  // to Node Test Runner.
-  if (dir.name === "hardhat-ignition-ui") {
-    continue;
-  }
-
-  // TODO: This is a temporary solution until we convert Ignitions tests
-  // to Node Test Runner.
-  if (dir.name === "hardhat-ignition") {
-    continue;
-  }
-
-  // TODO: This is a temporary solution until we convert Ignitions tests
-  // to Node Test Runner.
-  if (dir.name === "hardhat-ignition-viem") {
-    continue;
-  }
-
-  // TODO: This is a temporary solution until we convert Ignitions tests
-  // to Node Test Runner.
-  if (dir.name === "hardhat-ignition-ethers") {
     continue;
   }
 
@@ -67,12 +27,12 @@ for (const dir of dirs) {
     if (scriptName === "clean") {
       if (
         !packageJson.scripts[scriptName].startsWith(
-          templatePackageJson.scripts[scriptName],
+          templatePackageJson.scripts[scriptName]
         )
       ) {
         console.error(`Mismatch in script ${scriptName} in ${dir.name}`);
         console.error(
-          `  Expected to start with: ${templatePackageJson.scripts[scriptName]}`,
+          `  Expected to start with: ${templatePackageJson.scripts[scriptName]}`
         );
         console.error(`  Actual: ${packageJson.scripts[scriptName]}`);
         console.error();
