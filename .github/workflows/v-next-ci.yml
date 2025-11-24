@@ -199,6 +199,8 @@ jobs:
 
     name: "[${{ matrix.package }}] lint"
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: v-next/${{ matrix.package }}
