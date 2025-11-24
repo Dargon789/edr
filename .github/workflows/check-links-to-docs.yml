@@ -20,6 +20,8 @@ on:
 jobs:
   check-links-to-docs:
     name: Check that PR links to documentation
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     steps:
       - name: Checkout the repository
