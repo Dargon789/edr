@@ -1,4 +1,6 @@
 name: Run the Hardhat 2 test suite with the latest dependency versions
+permissions:
+  contents: read
 
 on:
   schedule:
