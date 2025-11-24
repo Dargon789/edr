@@ -112,6 +112,8 @@ jobs:
         package: ["hardhat"]
 
     name: "[${{ matrix.package }}] bundle"
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     defaults:
       run:
