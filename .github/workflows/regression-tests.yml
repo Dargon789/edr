@@ -1,4 +1,6 @@
 name: Regression Tests
+permissions:
+  contents: read
 
 on:
   workflow_call:
