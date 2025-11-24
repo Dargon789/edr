@@ -1,4 +1,6 @@
 name: Cache
+permissions:
+  contents: read
 
 on:
   push:
