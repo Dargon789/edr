@@ -302,6 +302,19 @@ export const ERROR_CATEGORIES: {
       },
     },
   },
+  HARDHAT_LEDGER: {
+    min: 90000,
+    max: 90999,
+    pluginId: "hardhat-ledger",
+    websiteTitle: "Hardhat Ledger",
+    CATEGORIES: {
+      GENERAL: {
+        min: 90000,
+        max: 90099,
+        websiteSubTitle: "General errors",
+      },
+    },
+  },
 };
 
 export const ERRORS = {
@@ -313,7 +326,7 @@ export const ERRORS = {
         websiteTitle: "You are not inside a Hardhat project",
         websiteDescription: `You are trying to run Hardhat outside of a Hardhat project.
 
-You can learn how to use Hardhat by reading the [Getting Started guide](/hardhat-runner/docs/getting-started).`,
+You can learn how to use Hardhat by reading the [Getting Started guide](/getting-started).`,
       },
       DUPLICATED_PLUGIN_ID: {
         number: 2,
@@ -472,6 +485,12 @@ Please resolve the errors before rerunning the command.`,
         websiteDescription: `You tried to run Hardhat from a global installation or not installing it at all. This is not supported.
 
 Please install Hardhat locally using pnpm, npm or yarn, and try again.`,
+      },
+      GLOBAL_OPTION_HIDDEN_NOT_SUPPORTED: {
+        number: 23,
+        messageTemplate: `Global option "{globalOption}" from plugin "{plugin}" cannot be hidden`,
+        websiteTitle: "Global option cannot be hidden",
+        websiteDescription: `A global option was defined as hidden, but global options cannot be hidden.`,
       },
     },
     INTERNAL: {
@@ -782,6 +801,13 @@ Please double check your arguments.`,
 
 Please double check your arguments.`,
       },
+      NO_HIDDEN_OPTION_CLI: {
+        number: 512,
+        messageTemplate:
+          'The option "{option}" is hidden and cannot be used from the CLI.',
+        websiteTitle: "Hidden options cannot be used from the CLI",
+        websiteDescription: `You are trying to use a hidden option from the CLI, which is not allowed.`,
+      },
     },
     BUILTIN_TASKS: {
       RUN_FILE_NOT_FOUND: {
@@ -938,7 +964,7 @@ Please double check your accounts and the "from" parameter in your RPC calls.`,
         websiteTitle: "Invalid HD path",
         websiteDescription: `An invalid HD/BIP32 derivation path was provided in your config.
 
-Read the [documentation](https://hardhat.org/hardhat-runner/docs/config#hd-wallet-config) to learn how to define HD accounts correctly.`,
+Read the [documentation](https://hardhat.org/hd-wallet-config) to learn how to define HD accounts correctly.`,
       },
       CANT_DERIVE_KEY: {
         number: 718,
@@ -1153,6 +1179,18 @@ Please check Hardhat's output for more details.`,
         messageTemplate: `Could not parse the full compiler version from "{versionString}" using "{compilerPath}"`,
         websiteTitle: "Could not parse a compiler version",
         websiteDescription: `Hardhat failed to parse the full compiler version from the output of the compiler's 'version' command.`,
+      },
+      UNRECOGNIZED_FILES_NOT_COMPILED: {
+        number: 915,
+        messageTemplate: `The build process failed because these files you provided haven't been recognized neither as contracts nor tests:
+        
+{files}
+
+Solidity test files must be placed in your test directory, or in your contracts directory and end in .t.sol.`,
+        websiteTitle: "Build failed due to unrecognized files",
+        websiteDescription: `Hardhat failed to build your contracts and/or tests because you passed a file as parameter, but it wasn't recognized neither as a valid contract nor test.
+        
+Solidity test files must be placed in your test directory, or in your contracts directory and end in .t.sol.`,
       },
     },
     ARTIFACTS: {
@@ -1962,7 +2000,7 @@ Please try again later.`,
       },
       MISSING_LINK_FOR_LIBRARY: {
         number: 20012,
-        messageTemplate: `The contract "{contractName}" is missing links for the following libraries: "{missingLibraries}". Learn more about linking contracts at (https://hardhat.org/hardhat-runner/plugins/nomicfoundation-hardhat-ethers#library-linking).`,
+        messageTemplate: `The contract "{contractName}" is missing links for the following libraries: "{missingLibraries}". Learn more about linking contracts at (https://hardhat.org/ethers-library-linking).`,
         websiteTitle: "Missing links for library",
         websiteDescription: "Missing links for library",
       },
@@ -2188,7 +2226,7 @@ You probably did something like this:
 
 Instead, define a fixture function and refer to that same function in each call to loadFixture.
 
-Learn more at (https://hardhat.org/hardhat-network-helpers/docs/reference#fixtures)`,
+Learn more at (https://hardhat.org/hardhat-network-helpers-fixtures)`,
         websiteTitle: "Anonymous functions cannot be used as fixtures",
         websiteDescription: "Anonymous functions cannot be used as fixtures",
       },
@@ -2779,6 +2817,80 @@ export default { lib1: "0x...", lib2: "0x...", ... };
         websiteTitle: "Invalid verification provider",
         websiteDescription:
           "The specified verification provider is not supported. Please use one of the supported providers.",
+      },
+    },
+  },
+  HARDHAT_LEDGER: {
+    GENERAL: {
+      INVALID_LEDGER_ADDRESS: {
+        number: 90000,
+        messageTemplate: `The ledger address "{address}" in the Hardhat configuration file is invalid.`,
+        websiteTitle: "Invalid ledger address",
+        websiteDescription: `The ledger address in the Hardhat configuration file is invalid.`,
+      },
+      UNOWNED_LEDGER_ADDRESS: {
+        number: 90001,
+        messageTemplate: `Transaction attempted from address "{address}", which is not listed in the Hardhat configuration file.`,
+        websiteTitle: "Unknown ledger address",
+        websiteDescription: `Transaction attempted from an address which is not listed in the Hardhat configuration file.`,
+      },
+      CONNECTION_ERROR: {
+        number: 90002,
+        messageTemplate: `There was an error trying to establish a connection to the Ledger wallet: {error}.{transportId}
+
+Make sure your Ledger is connected and unlocked, and that the Ethereum app is open.`,
+        websiteTitle: "Ledger connection error",
+        websiteDescription: `There was an error trying to establish a connection to the Ledger wallet.
+
+Make sure your Ledger is connected and unlocked, and that the Ethereum app is open.`,
+      },
+      ERROR_WHILE_DERIVING_PATH: {
+        number: 90003,
+        messageTemplate: `There was an error trying to derive path "{path}": "{message}". The wallet might be connected but locked or in the wrong app.`,
+        websiteTitle: "Error while deriving path",
+        websiteDescription: `There was an error trying to derivate the path. The wallet might be connected but locked or in the wrong app.`,
+      },
+      CANNOT_FIND_VALID_DERIVATION_PATH: {
+        number: 90004,
+        messageTemplate: `Cannot find a valid derivation path for address "{address}". Paths from {pathStart} to {pathEnd} were searched.`,
+        websiteTitle: "Cannot find valid derivation path",
+        websiteDescription: `Cannot find a valid derivation path for the address`,
+      },
+      PERSONAL_SIGN_MISSING_ADDRESS_PARAM: {
+        number: 90005,
+        messageTemplate: `Missing address parameter when calling personal_sign.`,
+        websiteTitle: "Missing address parameter when calling personal_sign",
+        websiteDescription: `You called "personal_sign" with incorrect parameters.
+
+Please check that you are sending an "address" parameter.`,
+      },
+      ETH_SIGN_MISSING_DATA_PARAM: {
+        number: 90006,
+        messageTemplate: `Missing "data" param when calling eth_sign.`,
+        websiteTitle: `Missing "data" param when calling eth_sign.`,
+        websiteDescription: `You called "eth_sign" with incorrect parameters.
+
+Please check that you are sending a "data" parameter.`,
+      },
+      ETH_SIGN_TYPED_DATA_V4_INVALID_DATA_PARAM: {
+        number: 90007,
+        messageTemplate: `Invalid "data" param when calling eth_signTypedData_v4.`,
+        websiteTitle: `Invalid "data" param when calling eth_signTypedData_v4.`,
+        websiteDescription: `You called "eth_signTypedData_v4" with incorrect parameters.
+
+Please check that you are sending a "data" parameter with a JSON string or object conforming to EIP712 TypedData schema.`,
+      },
+      LOCKED_DEVICE: {
+        number: 90008,
+        messageTemplate: `The ledger device is locked. Please unlock it and try again.`,
+        websiteTitle: `The ledger device is locked`,
+        websiteDescription: `The ledger device is locked. Please unlock it and try again.`,
+      },
+      EIP_7702_TX_CURRENTLY_NOT_SUPPORTED: {
+        number: 90009,
+        messageTemplate: `EIP-7702 transactions are currently not supported.`,
+        websiteTitle: `EIP-7702 transactions are currently not supported`,
+        websiteDescription: `EIP-7702 transactions are currently not supported.`,
       },
     },
   },

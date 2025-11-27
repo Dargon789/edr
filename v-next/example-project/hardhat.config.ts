@@ -1,4 +1,4 @@
-import type { HardhatUserConfig } from "hardhat/config";
+import { defineConfig } from "hardhat/config";
 
 import { HardhatPluginError } from "hardhat/plugins";
 
@@ -15,6 +15,7 @@ import hardhatChaiMatchersPlugin from "@nomicfoundation/hardhat-ethers-chai-matc
 import hardhatTypechain from "@nomicfoundation/hardhat-typechain";
 import hardhatIgnitionViem from "@nomicfoundation/hardhat-ignition-viem";
 import hardhatVerify from "@nomicfoundation/hardhat-verify";
+import hardhatLedger from "@nomicfoundation/hardhat-ledger";
 import { ArgumentType } from "hardhat/types/arguments";
 
 util.inspect.defaultOptions.depth = null;
@@ -67,6 +68,13 @@ const greeting = task("hello", "Print a greeting")
     name: "greeting",
     description: "The greeting to print",
     defaultValue: "Hello, World!",
+  })
+  .addOption({
+    name: "programmatic",
+    description: "An example to show a hidden option",
+    type: ArgumentType.BOOLEAN,
+    defaultValue: false,
+    hidden: true,
   })
   .setAction(async () => ({
     default: async ({ greeting }, _) => {
@@ -124,7 +132,7 @@ const pluginExample = {
   ],
 };
 
-const config: HardhatUserConfig = {
+export default defineConfig({
   networks: {
     op: {
       type: "http",
@@ -139,6 +147,10 @@ const config: HardhatUserConfig = {
       forking: {
         url: "https://mainnet.optimism.io",
       },
+      ledgerAccounts: [
+        // Set your ledger address here
+        // "0x070Da0697e6B82F0ab3f5D0FD9210EAdF2Ba1516",
+      ],
     },
     opSepolia: {
       type: "http",
@@ -175,6 +187,7 @@ const config: HardhatUserConfig = {
     hardhatChaiMatchersPlugin,
     hardhatTypechain,
     hardhatIgnitionViem,
+    hardhatLedger,
   ],
   paths: {
     tests: {
@@ -227,6 +240,4 @@ const config: HardhatUserConfig = {
       timeout: 1000,
     },
   },
-};
-
-export default config;
+});

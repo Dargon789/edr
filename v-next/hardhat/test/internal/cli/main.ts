@@ -228,6 +228,34 @@ describe("main", function () {
       });
     });
 
+    describe("task with hidden option", function () {
+      useFixtureProject("cli/parsing/hidden-option");
+
+      it("should throw when passing a hidden option from the CLI", async function () {
+        const command = "npx hardhat test-task --opt <value>";
+
+        await assertRejectsWithHardhatError(
+          () => runMain(command),
+          HardhatError.ERRORS.CORE.ARGUMENTS.NO_HIDDEN_OPTION_CLI,
+          {
+            option: "--opt",
+          },
+        );
+      });
+
+      it("should throw when passing a hidden flag from the CLI", async function () {
+        const command = "npx hardhat test-task --flag";
+
+        await assertRejectsWithHardhatError(
+          () => runMain(command),
+          HardhatError.ERRORS.CORE.ARGUMENTS.NO_HIDDEN_OPTION_CLI,
+          {
+            option: "--flag",
+          },
+        );
+      });
+    });
+
     describe("global help", function () {
       useFixtureProject("cli/parsing/base-project");
 
@@ -261,6 +289,7 @@ GLOBAL OPTIONS:
   --build-profile          The build profile to use
   --config                 A Hardhat config file
   --coverage               Enables code coverage
+  --gas-stats              Collects and displays gas usage statistics for all function calls during tests
   --help, -h               Show this message, or a task's help if its name is provided
   --init                   Initializes a Hardhat project
   --network                The network to connect to
@@ -333,6 +362,7 @@ GLOBAL OPTIONS:
   --build-profile          The build profile to use
   --config                 A Hardhat config file
   --coverage               Enables code coverage
+  --gas-stats              Collects and displays gas usage statistics for all function calls during tests
   --help, -h               Show this message, or a task's help if its name is provided
   --init                   Initializes a Hardhat project
   --network                The network to connect to
@@ -372,6 +402,7 @@ GLOBAL OPTIONS:
   --build-profile          The build profile to use
   --config                 A Hardhat config file
   --coverage               Enables code coverage
+  --gas-stats              Collects and displays gas usage statistics for all function calls during tests
   --help, -h               Show this message, or a task's help if its name is provided
   --init                   Initializes a Hardhat project
   --network                The network to connect to
