@@ -1,6 +1,12 @@
+<<<<<<< Updated upstream
 import type EthereumjsUtilT from "@ethereumjs/util";
 
 import picocolors from "picocolors";
+=======
+import type EthereumjsUtilT from "@nomicfoundation/ethereumjs-util";
+
+import chalk from "chalk";
+>>>>>>> Stashed changes
 import debug from "debug";
 import fsExtra from "fs-extra";
 
@@ -35,12 +41,20 @@ const log = debug("hardhat:core:tasks:node");
 
 function printDefaultConfigWarning() {
   console.log(
+<<<<<<< Updated upstream
     picocolors.bold(
+=======
+    chalk.bold(
+>>>>>>> Stashed changes
       "WARNING: These accounts, and their private keys, are publicly known."
     )
   );
   console.log(
+<<<<<<< Updated upstream
     picocolors.bold(
+=======
+    chalk.bold(
+>>>>>>> Stashed changes
       "Any funds sent to them on Mainnet or any other live network WILL BE LOST."
     )
   );
@@ -51,12 +65,17 @@ function logHardhatNetworkAccounts(networkConfig: HardhatNetworkConfig) {
     !Array.isArray(networkConfig.accounts) &&
     networkConfig.accounts.mnemonic === HARDHAT_NETWORK_MNEMONIC;
 
+<<<<<<< Updated upstream
   const {
     bytesToHex: bufferToHex,
     privateToAddress,
     toBytes,
     toChecksumAddress,
   } = require("@ethereumjs/util") as typeof EthereumjsUtilT;
+=======
+  const { bufferToHex, privateToAddress, toBuffer, toChecksumAddress } =
+    require("@nomicfoundation/ethereumjs-util") as typeof EthereumjsUtilT;
+>>>>>>> Stashed changes
 
   console.log("Accounts");
   console.log("========");
@@ -73,7 +92,11 @@ function logHardhatNetworkAccounts(networkConfig: HardhatNetworkConfig) {
 
   for (const [index, account] of accounts.entries()) {
     const address = toChecksumAddress(
+<<<<<<< Updated upstream
       bufferToHex(privateToAddress(toBytes(account.privateKey)))
+=======
+      bufferToHex(privateToAddress(toBuffer(account.privateKey)))
+>>>>>>> Stashed changes
     );
 
     const balance = (BigInt(account.balance) / 10n ** 18n).toString(10);
@@ -81,7 +104,11 @@ function logHardhatNetworkAccounts(networkConfig: HardhatNetworkConfig) {
     let entry = `Account #${index}: ${address} (${balance} ETH)`;
 
     if (isDefaultConfig) {
+<<<<<<< Updated upstream
       const privateKey = bufferToHex(toBytes(account.privateKey));
+=======
+      const privateKey = bufferToHex(toBuffer(account.privateKey));
+>>>>>>> Stashed changes
       entry += `
 Private Key: ${privateKey}`;
     }
@@ -211,7 +238,11 @@ subtask(TASK_NODE_SERVER_CREATED)
       provider: EthereumProvider;
       server: JsonRpcServer;
     }) => {
+<<<<<<< Updated upstream
       // this task is meant to be overridden by plugin writers
+=======
+      // this task is meant to be overriden by plugin writers
+>>>>>>> Stashed changes
     }
   );
 
@@ -237,7 +268,11 @@ subtask(TASK_NODE_SERVER_READY)
       { config }
     ) => {
       console.log(
+<<<<<<< Updated upstream
         picocolors.green(
+=======
+        chalk.green(
+>>>>>>> Stashed changes
           `Started HTTP and WebSocket JSON-RPC server at http://${address}:${port}/`
         )
       );
@@ -339,7 +374,11 @@ task(TASK_NODE, "Starts a JSON-RPC server on top of Hardhat Network")
           watcher = await watchCompilerOutput(provider, config.paths);
         } catch (error) {
           console.warn(
+<<<<<<< Updated upstream
             picocolors.yellow(
+=======
+            chalk.yellow(
+>>>>>>> Stashed changes
               "There was a problem watching the compiler output, changes in the contracts won't be reflected in the Hardhat Network. Run Hardhat with --verbose to learn more."
             )
           );

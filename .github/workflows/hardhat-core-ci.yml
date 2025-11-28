@@ -1,6 +1,8 @@
 permissions:
   contents: read
 name: hardhat-core CI
+permissions:
+  contents: read
 
 on:
   push:

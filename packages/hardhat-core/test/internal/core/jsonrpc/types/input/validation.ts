@@ -1,4 +1,8 @@
+<<<<<<< Updated upstream
 import { toBytes } from "@ethereumjs/util";
+=======
+import { toBuffer } from "@nomicfoundation/ethereumjs-util";
+>>>>>>> Stashed changes
 import { assert } from "chai";
 import * as t from "io-ts";
 
@@ -11,10 +15,13 @@ import { optionalRpcNewBlockTag } from "../../../../../../src/internal/core/json
 import { validateParams } from "../../../../../../src/internal/core/jsonrpc/types/input/validation";
 import { InvalidArgumentsError } from "../../../../../../src/internal/core/providers/errors";
 
+<<<<<<< Updated upstream
 function toBuffer(x: Parameters<typeof toBytes>[0]) {
   return Buffer.from(toBytes(x));
 }
 
+=======
+>>>>>>> Stashed changes
 describe("validateParams", function () {
   describe("0-arguments", function () {
     it("Should return an empty array if no argument is given", function () {

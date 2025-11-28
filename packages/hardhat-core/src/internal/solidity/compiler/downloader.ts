@@ -8,7 +8,11 @@ import { promisify } from "util";
 import { download } from "../../util/download";
 import { assertHardhatInvariant, HardhatError } from "../../core/errors";
 import { ERRORS } from "../../core/errors-list";
+<<<<<<< Updated upstream
 import { MultiProcessMutex } from "../../util/multi-process-mutex";
+=======
+import { Mutex } from "../../vendor/await-semaphore";
+>>>>>>> Stashed changes
 
 const log = debug("hardhat:core:solidity:downloader");
 
@@ -126,7 +130,11 @@ export class CompilerDownloader implements ICompilerDownloader {
   }
 
   public static defaultCompilerListCachePeriod = 3_600_00;
+<<<<<<< Updated upstream
   private readonly _mutex = new MultiProcessMutex("compiler-download");
+=======
+  private readonly _mutex = new Mutex();
+>>>>>>> Stashed changes
 
   /**
    * Use CompilerDownloader.getConcurrencySafeDownloader instead
@@ -316,14 +324,22 @@ export class CompilerDownloader implements ICompilerDownloader {
     build: CompilerBuild,
     downloadPath: string
   ): Promise<boolean> {
+<<<<<<< Updated upstream
     const { bytesToHex } =
       require("@ethereumjs/util") as typeof import("@ethereumjs/util");
+=======
+    const ethereumjsUtil = require("@nomicfoundation/ethereumjs-util");
+>>>>>>> Stashed changes
     const { keccak256 } = await import("../../util/keccak");
 
     const expectedKeccak256 = build.keccak256;
     const compiler = await fsExtra.readFile(downloadPath);
 
+<<<<<<< Updated upstream
     const compilerKeccak256 = bytesToHex(keccak256(compiler));
+=======
+    const compilerKeccak256 = ethereumjsUtil.bufferToHex(keccak256(compiler));
+>>>>>>> Stashed changes
 
     if (expectedKeccak256 !== compilerKeccak256) {
       await fsExtra.unlink(downloadPath);

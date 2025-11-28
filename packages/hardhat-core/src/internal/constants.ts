@@ -22,8 +22,11 @@ export const HARDHAT_NETWORK_SUPPORTED_HARDFORKS = [
   "grayGlacier",
   "merge",
   "shanghai",
+<<<<<<< Updated upstream
   "cancun",
   "prague",
+=======
+>>>>>>> Stashed changes
 ];
 
 export const HARDHAT_MEMPOOL_SUPPORTED_ORDERS = ["fifo", "priority"] as const;

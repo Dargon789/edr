@@ -53,7 +53,11 @@ export function normalizeHardhatNetworkAccountsConfig(
     return accountsConfig;
   }
 
+<<<<<<< Updated upstream
   const { bytesToHex } = require("@ethereumjs/util");
+=======
+  const { bufferToHex } = require("@nomicfoundation/ethereumjs-util");
+>>>>>>> Stashed changes
 
   return derivePrivateKeys(
     accountsConfig.mnemonic,
@@ -62,7 +66,11 @@ export function normalizeHardhatNetworkAccountsConfig(
     accountsConfig.count,
     accountsConfig.passphrase
   ).map((pk) => ({
+<<<<<<< Updated upstream
     privateKey: bytesToHex(pk),
+=======
+    privateKey: bufferToHex(pk),
+>>>>>>> Stashed changes
     balance: accountsConfig.accountsBalance ?? DEFAULT_HARDHAT_NETWORK_BALANCE,
   }));
 }

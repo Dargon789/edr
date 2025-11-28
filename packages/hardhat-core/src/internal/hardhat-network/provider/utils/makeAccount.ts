@@ -1,4 +1,13 @@
+<<<<<<< Updated upstream
 import { Account, Address, privateToAddress, toBytes } from "@ethereumjs/util";
+=======
+import {
+  Account,
+  Address,
+  privateToAddress,
+  toBuffer,
+} from "@nomicfoundation/ethereumjs-util";
+>>>>>>> Stashed changes
 
 import { GenesisAccount } from "../node-types";
 
@@ -14,7 +23,11 @@ export function makeAccount(ga: GenesisAccount) {
   }
 
   const account = Account.fromAccountData({ balance });
+<<<<<<< Updated upstream
   const pk = toBytes(ga.privateKey);
+=======
+  const pk = toBuffer(ga.privateKey);
+>>>>>>> Stashed changes
   const address = new Address(privateToAddress(pk));
   return { account, address };
 }

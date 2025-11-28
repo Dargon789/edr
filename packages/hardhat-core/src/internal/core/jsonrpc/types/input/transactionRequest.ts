@@ -2,8 +2,12 @@ import * as t from "io-ts";
 
 import { optionalOrNullable } from "../../../../util/io-ts";
 import { rpcAccessList } from "../access-list";
+<<<<<<< Updated upstream
 import { rpcAddress, rpcData, rpcHash, rpcQuantity } from "../base-types";
 import { rpcAuthorizationList } from "../authorization-list";
+=======
+import { rpcAddress, rpcData, rpcQuantity } from "../base-types";
+>>>>>>> Stashed changes
 
 // Type used by eth_sendTransaction
 export const rpcTransactionRequest = t.type(
@@ -19,9 +23,12 @@ export const rpcTransactionRequest = t.type(
     chainId: optionalOrNullable(rpcQuantity),
     maxFeePerGas: optionalOrNullable(rpcQuantity),
     maxPriorityFeePerGas: optionalOrNullable(rpcQuantity),
+<<<<<<< Updated upstream
     blobs: optionalOrNullable(t.array(rpcData)),
     blobVersionedHashes: optionalOrNullable(t.array(rpcHash)),
     authorizationList: optionalOrNullable(rpcAuthorizationList),
+=======
+>>>>>>> Stashed changes
   },
   "RpcTransactionRequest"
 );
@@ -42,6 +49,7 @@ export interface RpcTransactionRequestInput {
   }>;
   maxFeePerGas?: string;
   maxPriorityFeePerGas?: string;
+<<<<<<< Updated upstream
   blobs?: string[];
   blobVersionedHashes?: string[];
   authorizationList?: Array<{
@@ -52,6 +60,8 @@ export interface RpcTransactionRequestInput {
     r: string;
     s: string;
   }>;
+=======
+>>>>>>> Stashed changes
 }
 
 export type RpcTransactionRequest = t.TypeOf<typeof rpcTransactionRequest>;

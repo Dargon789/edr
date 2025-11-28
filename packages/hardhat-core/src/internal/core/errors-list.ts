@@ -251,7 +251,11 @@ This bug can only affect you if you, or someone at your team, installed the proj
 To avoid it, please delete both your node_modules and package-lock.json, and reinstall your project.
 
 Note that you don't need to do this every time you install a new dependency, but please make sure to delete your node_modules every time you delete your package-lock.json.`,
+<<<<<<< Updated upstream
       shouldBeReported: true,
+=======
+      shouldBeReported: false,
+>>>>>>> Stashed changes
     },
     ESM_PROJECT_WITHOUT_CJS_CONFIG: {
       number: 19,
@@ -475,6 +479,7 @@ Please double check your transactions' parameters.`,
 Please check that you are sending an \`address\` parameter.`,
       shouldBeReported: false,
     },
+<<<<<<< Updated upstream
     EMPTY_URL: {
       number: 117,
       message:
@@ -504,6 +509,8 @@ Please double check your transactions' parameters.`,
         "The transaction to the null address cannot have undefined data",
       shouldBeReported: false,
     },
+=======
+>>>>>>> Stashed changes
   },
   TASK_DEFINITIONS: {
     PARAM_AFTER_VARIADIC: {
@@ -570,7 +577,11 @@ Please use \`runSuper.isDefined\` to make sure that you can call it.`,
     DEFAULT_VALUE_WRONG_TYPE: {
       number: 206,
       message:
+<<<<<<< Updated upstream
         "Default value for param %paramName% of task %taskName% doesn't match its expected type.",
+=======
+        "Default value for param %paramName% of task %taskName% doesn't match the default one, try specifying it.",
+>>>>>>> Stashed changes
       title: "Default value has incorrect type",
       description: `One of your tasks has a parameter whose default value doesn't match the expected type.
 
@@ -1049,6 +1060,7 @@ If you are running MacOS, try installing Apple Rosetta.
 If this error persists, run "npx hardhat clean --global".`,
       shouldBeReported: false,
     },
+<<<<<<< Updated upstream
     SOLCJS_ERROR: {
       number: 506,
       message: "Error running solcjs: %error%",
@@ -1056,6 +1068,8 @@ If this error persists, run "npx hardhat clean --global".`,
       description: `There was an error while running the solcjs compiler.`,
       shouldBeReported: false,
     },
+=======
+>>>>>>> Stashed changes
   },
   BUILTIN_TASKS: {
     COMPILE_FAILURE: {

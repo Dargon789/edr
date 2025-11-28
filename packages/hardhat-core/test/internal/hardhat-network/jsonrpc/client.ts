@@ -1,4 +1,8 @@
+<<<<<<< Updated upstream
 import { bytesToBigInt as bufferToBigInt, toBytes } from "@ethereumjs/util";
+=======
+import { bufferToBigInt, toBuffer } from "@nomicfoundation/ethereumjs-util";
+>>>>>>> Stashed changes
 import { assert } from "chai";
 import fsExtra from "fs-extra";
 import sinon from "sinon";
@@ -21,10 +25,13 @@ import {
 } from "../helpers/constants";
 import { FORKED_PROVIDERS } from "../helpers/providers";
 
+<<<<<<< Updated upstream
 function toBuffer(x: Parameters<typeof toBytes>[0]) {
   return Buffer.from(toBytes(x));
 }
 
+=======
+>>>>>>> Stashed changes
 type FakeProvider = Pick<HttpProvider, "url" | "sendBatch"> & {
   request: sinon.SinonStub | HttpProvider["request"];
 };
@@ -383,10 +390,14 @@ describe("JsonRpcClient", () => {
           });
 
           it("returns null for non-existent block", async () => {
+<<<<<<< Updated upstream
             const block = await client.getBlockByHash(
               Buffer.from(randomHashBuffer()),
               true
             );
+=======
+            const block = await client.getBlockByHash(randomHashBuffer(), true);
+>>>>>>> Stashed changes
             assert.isNull(block);
           });
         });
@@ -436,7 +447,11 @@ describe("JsonRpcClient", () => {
 
           it("returns null for non-existent transactions", async () => {
             const transaction = await client.getTransactionByHash(
+<<<<<<< Updated upstream
               Buffer.from(randomHashBuffer())
+=======
+              randomHashBuffer()
+>>>>>>> Stashed changes
             );
             assert.equal(transaction, null);
           });
@@ -457,7 +472,11 @@ describe("JsonRpcClient", () => {
 
           it("returns null for non-existent transactions", async () => {
             const transaction = await client.getTransactionReceipt(
+<<<<<<< Updated upstream
               Buffer.from(randomHashBuffer())
+=======
+              randomHashBuffer()
+>>>>>>> Stashed changes
             );
             assert.equal(transaction, null);
           });

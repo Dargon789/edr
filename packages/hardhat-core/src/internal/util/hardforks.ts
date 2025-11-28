@@ -1,9 +1,13 @@
+<<<<<<< Updated upstream
 import { HardforkHistoryConfig } from "../../types/config";
 import { HARDHAT_NETWORK_SUPPORTED_HARDFORKS } from "../constants";
 import { assertHardhatInvariant } from "../core/errors";
 import { InternalError } from "../core/providers/errors";
 
 /* eslint-disable @nomicfoundation/hardhat-internal-rules/only-hardhat-error */
+=======
+import { assertHardhatInvariant } from "../core/errors";
+>>>>>>> Stashed changes
 
 export enum HardforkName {
   FRONTIER = "chainstart",
@@ -22,8 +26,11 @@ export enum HardforkName {
   GRAY_GLACIER = "grayGlacier",
   MERGE = "merge",
   SHANGHAI = "shanghai",
+<<<<<<< Updated upstream
   CANCUN = "cancun",
   PRAGUE = "prague",
+=======
+>>>>>>> Stashed changes
 }
 
 const HARDFORKS_ORDER: HardforkName[] = [
@@ -43,8 +50,11 @@ const HARDFORKS_ORDER: HardforkName[] = [
   HardforkName.GRAY_GLACIER,
   HardforkName.MERGE,
   HardforkName.SHANGHAI,
+<<<<<<< Updated upstream
   HardforkName.CANCUN,
   HardforkName.PRAGUE,
+=======
+>>>>>>> Stashed changes
 ];
 
 export function getHardforkName(name: string): HardforkName {
@@ -76,6 +86,7 @@ export function hardforkGte(
 
   return indexA >= indexB;
 }
+<<<<<<< Updated upstream
 
 export function selectHardfork(
   forkBlockNumber: bigint | undefined,
@@ -123,3 +134,5 @@ export function selectHardfork(
 
   return hardfork;
 }
+=======
+>>>>>>> Stashed changes

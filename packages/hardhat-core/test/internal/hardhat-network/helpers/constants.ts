@@ -1,4 +1,5 @@
 // reused from ethers.js
+<<<<<<< Updated upstream
 import { Address, toBytes } from "@ethereumjs/util";
 import path from "path";
 
@@ -6,6 +7,11 @@ function toBuffer(x: Parameters<typeof toBytes>[0]) {
   return Buffer.from(toBytes(x));
 }
 
+=======
+import { Address, toBuffer } from "@nomicfoundation/ethereumjs-util";
+import path from "path";
+
+>>>>>>> Stashed changes
 export const DAI_ADDRESS = Address.fromString(
   "0x6b175474e89094c44da98b954eedeac495271d0f"
 );
@@ -21,7 +27,11 @@ export const UNISWAP_FACTORY_ADDRESS = Address.fromString(
 );
 
 export const EMPTY_ACCOUNT_ADDRESS = Address.fromString(
+<<<<<<< Updated upstream
   "0x246a566a96ae9fa8dcf04d4c6c094c7c492f018f"
+=======
+  "0x1234567890abcdef1234567890abcdef12345678"
+>>>>>>> Stashed changes
 );
 
 // top Ether holder as of 24.08.2020
