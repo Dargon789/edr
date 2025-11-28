@@ -1,7 +1,17 @@
 ---
 name: Custom issue template
 about: Describe this issue template's purpose here.
-title: ""
-labels: ""
-assignees: ""
+title: ''
+labels: ''
+assignees: ''
+
 ---
+
+### Summary
+A clear and concise description of the issue or feature request.
+
+### Motivation
+Why is this change needed? What problem does it solve?
+
+### Details
+Provide more details, such as steps to reproduce for a bug, or implementation ideas for a feature.
