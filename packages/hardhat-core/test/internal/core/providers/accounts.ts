@@ -1,4 +1,3 @@
-<<<<<<< Updated upstream
 import { assert } from "chai";
 import {
   bytesToHex as bufferToHex,
@@ -6,7 +5,6 @@ import {
   toBytes,
 } from "@ethereumjs/util";
 import { Transaction } from "micro-eth-signer";
-=======
 import { Common } from "@nomicfoundation/ethereumjs-common";
 import { AccessListEIP2930Transaction } from "@nomicfoundation/ethereumjs-tx";
 import { assert } from "chai";
@@ -15,7 +13,6 @@ import {
   privateToAddress,
   toBuffer,
 } from "@nomicfoundation/ethereumjs-util";
->>>>>>> Stashed changes
 
 import { ERRORS } from "../../../../src/internal/core/errors-list";
 import { numberToRpcQuantity } from "../../../../src/internal/core/jsonrpc/types/base-types";
@@ -32,7 +29,7 @@ import {
   expectHardhatError,
   expectHardhatErrorAsync,
 } from "../../../helpers/errors";
-<<<<<<< Updated upstream
+
 import { MockedProvider } from "./mocks";
 
 function toBuffer(x: Parameters<typeof toBytes>[0]) {
@@ -41,13 +38,12 @@ function toBuffer(x: Parameters<typeof toBytes>[0]) {
 
 function privateKeyToAddress(privateKey: string): string {
   return bufferToHex(privateToAddress(toBuffer(privateKey)));
-=======
+
 
 import { MockedProvider } from "./mocks";
 
 function privateKeyToAddress(privateKey: string): string {
   return bufferToHex(privateToAddress(toBuffer(privateKey))).toLowerCase();
->>>>>>> Stashed changes
 }
 
 const MOCK_PROVIDER_CHAIN_ID = 123;
@@ -60,10 +56,7 @@ describe("Local accounts provider", () => {
     "0x6d7229c1db5892730b84b4bc10543733b72cabf4cd3130d910faa8e459bb8eca",
     "0x6d4ec871d9b5469119bbfc891e958b6220d076a6849006098c370c8af5fc7776",
     "0xec02c2b7019e75378a05018adc30a0252ba705670acb383a1d332e57b0b792d2",
-<<<<<<< Updated upstream
     "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
-=======
->>>>>>> Stashed changes
   ];
 
   beforeEach(() => {
@@ -329,7 +322,6 @@ describe("Local accounts provider", () => {
     validateRawEIP2930Transaction(expectedRaw, tx);
   });
 
-<<<<<<< Updated upstream
   it("should send EIP-7702 transactions", async () => {
     const tx = {
       from: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
@@ -501,8 +493,6 @@ describe("Local accounts provider", () => {
     );
   });
 
-=======
->>>>>>> Stashed changes
   it("should add the chainId value if it's missing", async () => {
     const tx = {
       from: "0xb5bc06d4548a3ac17d72b372ae1e416bf65b8ead",
@@ -1020,7 +1010,7 @@ describe("Sender providers", () => {
  * the same values as `tx`
  */
 function validateRawEIP2930Transaction(rawTx: string, tx: any) {
-<<<<<<< Updated upstream
+
   const sentTx = Transaction.fromHex(rawTx);
 
   assert.equal(sentTx.type, "eip2930");
@@ -1043,9 +1033,8 @@ function validateRawEIP2930Transaction(rawTx: string, tx: any) {
   assert.equal(numberToRpcQuantity(parsedTx.raw.nonce), tx.nonce);
   assert.equal(numberToRpcQuantity(parsedTx.raw.value), tx.value);
   assert.deepEqual(parsedTxAccessList, tx.accessList);
-=======
-  const common = Common.custom({ chainId: MOCK_PROVIDER_CHAIN_ID });
 
+  const common = Common.custom({ chainId: MOCK_PROVIDER_CHAIN_ID });
   const sentTx = AccessListEIP2930Transaction.fromSerializedTx(
     toBuffer(rawTx),
     { common }
@@ -1060,11 +1049,9 @@ function validateRawEIP2930Transaction(rawTx: string, tx: any) {
 
   assert.equal(sentTx.getSenderAddress().toString(), tx.from);
   assert.equal(sentTx.to?.toString(), tx.to);
-
   assert.equal(numberToRpcQuantity(sentTx.gasLimit), tx.gas);
   assert.equal(numberToRpcQuantity(sentTx.gasPrice), tx.gasPrice);
   assert.equal(numberToRpcQuantity(sentTx.nonce), tx.nonce);
   assert.equal(numberToRpcQuantity(sentTx.value), tx.value);
   assert.deepEqual(accessList, tx.accessList);
->>>>>>> Stashed changes
 }

@@ -1,5 +1,4 @@
-<<<<<<< Updated upstream
-=======
+
 import { Block } from "@nomicfoundation/ethereumjs-block";
 import { Common } from "@nomicfoundation/ethereumjs-common";
 import { TypedTransaction } from "@nomicfoundation/ethereumjs-tx";
@@ -19,7 +18,6 @@ import { assertHardhatNetworkInvariant } from "./utils/assertions";
 const FIRST_HARDFORK_WITH_TRANSACTION_TYPE = "berlin";
 const FIRST_HARDFORK_WITH_EIP1559 = "london";
 
->>>>>>> Stashed changes
 // TODO: These types should be moved to core, and probably inferred by io-ts
 export interface RpcBlockOutput {
   difficulty: string;
@@ -45,23 +43,17 @@ export interface RpcBlockOutput {
   baseFeePerGas?: string;
   withdrawals?: RpcWithdrawalItem[];
   withdrawalsRoot?: string;
-<<<<<<< Updated upstream
   parentBeaconBlockRoot?: string | null;
   blobGasUsed?: string | null;
   excessBlobGas?: string | null;
-=======
->>>>>>> Stashed changes
 }
 
 export type RpcTransactionOutput =
   | LegacyRpcTransactionOutput
   | AccessListEIP2930RpcTransactionOutput
-<<<<<<< Updated upstream
   | EIP1559RpcTransactionOutput
   | EOACodeEIP7702TransactionOutput;
-=======
   | EIP1559RpcTransactionOutput;
->>>>>>> Stashed changes
 
 interface BaseRpcTransactionOutput {
   blockHash: string | null;
@@ -90,7 +82,7 @@ export type RpcAccessListOutput = Array<{
   storageKeys: string[];
 }>;
 
-<<<<<<< Updated upstream
+
 export type RpcAuthorizationListOutput = Array<{
   chainId: string;
   address: string;
@@ -100,8 +92,7 @@ export type RpcAuthorizationListOutput = Array<{
   s: string;
 }>;
 
-=======
->>>>>>> Stashed changes
+
 export interface AccessListEIP2930RpcTransactionOutput
   extends BaseRpcTransactionOutput {
   gasPrice: string;
@@ -117,14 +108,12 @@ export interface EIP1559RpcTransactionOutput extends BaseRpcTransactionOutput {
   chainId: string;
 }
 
-<<<<<<< Updated upstream
+
 export interface EOACodeEIP7702TransactionOutput
   extends EIP1559RpcTransactionOutput {
   authorizationList?: RpcAuthorizationListOutput;
 }
 
-=======
->>>>>>> Stashed changes
 export interface RpcReceiptOutput {
   blockHash: string;
   blockNumber: string;
@@ -189,8 +178,6 @@ export interface RpcWithdrawalItem {
   address: string;
   amount: string;
 }
-<<<<<<< Updated upstream
-=======
 
 /* eslint-disable @nomicfoundation/hardhat-internal-rules/only-hardhat-error */
 
@@ -500,4 +487,3 @@ export function shouldShowTransactionTypeForHardfork(common: Common) {
 export function shouldShowEffectiveGasPriceForHardfork(common: Common) {
   return common.gteHardfork(FIRST_HARDFORK_WITH_EIP1559);
 }
->>>>>>> Stashed changes

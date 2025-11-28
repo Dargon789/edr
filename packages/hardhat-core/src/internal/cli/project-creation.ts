@@ -1,8 +1,6 @@
-<<<<<<< Updated upstream
-import picocolors from "picocolors";
-=======
+
 import chalk from "chalk";
->>>>>>> Stashed changes
+
 import fsExtra from "fs-extra";
 import path from "path";
 
@@ -27,10 +25,8 @@ import {
 import { emoji } from "./emoji";
 import { Dependencies, PackageManager } from "./types";
 import { requestTelemetryConsent } from "./analytics";
-<<<<<<< Updated upstream
+
 import { BannerManager } from "./banner-manager";
-=======
->>>>>>> Stashed changes
 
 enum Action {
   CREATE_JAVASCRIPT_PROJECT_ACTION = "Create a JavaScript project",
@@ -50,19 +46,18 @@ const HARDHAT_PACKAGE_NAME = "hardhat";
 const PROJECT_DEPENDENCIES: Dependencies = {};
 
 const ETHERS_PROJECT_DEPENDENCIES: Dependencies = {
-<<<<<<< Updated upstream
+
   "@nomicfoundation/hardhat-toolbox": "^5.0.0",
 };
 
 const VIEM_PROJECT_DEPENDENCIES: Dependencies = {
   "@nomicfoundation/hardhat-toolbox-viem": "^3.0.0",
-=======
+
   "@nomicfoundation/hardhat-toolbox": "^4.0.0",
 };
 
 const VIEM_PROJECT_DEPENDENCIES: Dependencies = {
   "@nomicfoundation/hardhat-toolbox-viem": "^2.0.0",
->>>>>>> Stashed changes
 };
 
 const PEER_DEPENDENCIES: Dependencies = {
@@ -72,10 +67,7 @@ const PEER_DEPENDENCIES: Dependencies = {
   chai: "^4.2.0",
   "hardhat-gas-reporter": "^1.0.8",
   "solidity-coverage": "^0.8.0",
-<<<<<<< Updated upstream
   "@nomicfoundation/hardhat-ignition": "^0.15.0",
-=======
->>>>>>> Stashed changes
 };
 
 const ETHERS_PEER_DEPENDENCIES: Dependencies = {
@@ -85,7 +77,7 @@ const ETHERS_PEER_DEPENDENCIES: Dependencies = {
   "@typechain/hardhat": "^9.0.0",
   typechain: "^8.3.0",
   "@typechain/ethers-v6": "^0.5.0",
-<<<<<<< Updated upstream
+
   "@nomicfoundation/hardhat-ignition-ethers": "^0.15.0",
 };
 
@@ -93,13 +85,11 @@ const VIEM_PEER_DEPENDENCIES: Dependencies = {
   "@nomicfoundation/hardhat-viem": "^2.0.0",
   viem: "^2.7.6",
   "@nomicfoundation/hardhat-ignition-viem": "^0.15.0",
-=======
 };
 
 const VIEM_PEER_DEPENDENCIES: Dependencies = {
   "@nomicfoundation/hardhat-viem": "^1.0.0",
   viem: "^1.15.1",
->>>>>>> Stashed changes
 };
 
 const TYPESCRIPT_DEPENDENCIES: Dependencies = {};
@@ -107,11 +97,11 @@ const TYPESCRIPT_DEPENDENCIES: Dependencies = {};
 const TYPESCRIPT_PEER_DEPENDENCIES: Dependencies = {
   "@types/chai": "^4.2.0",
   "@types/mocha": ">=9.1.0",
-<<<<<<< Updated upstream
+
   "@types/node": ">=18.0.0",
-=======
+
   "@types/node": ">=16.0.0",
->>>>>>> Stashed changes
+
   "ts-node": ">=8.0.0",
   typescript: ">=4.5.0",
 };
@@ -128,36 +118,7 @@ const TYPESCRIPT_VIEM_PEER_DEPENDENCIES: Dependencies = {
 // generated with the "colossal" font
 function printAsciiLogo() {
   console.log(
-<<<<<<< Updated upstream
-    picocolors.blue("888    888                      888 888               888")
-  );
-  console.log(
-    picocolors.blue("888    888                      888 888               888")
-  );
-  console.log(
-    picocolors.blue("888    888                      888 888               888")
-  );
-  console.log(
-    picocolors.blue(
-      "8888888888  8888b.  888d888 .d88888 88888b.   8888b.  888888"
-    )
-  );
-  console.log(
-    picocolors.blue('888    888     "88b 888P"  d88" 888 888 "88b     "88b 888')
-  );
-  console.log(
-    picocolors.blue("888    888 .d888888 888    888  888 888  888 .d888888 888")
-  );
-  console.log(
-    picocolors.blue(
-      "888    888 888  888 888    Y88b 888 888  888 888  888 Y88b."
-    )
-  );
-  console.log(
-    picocolors.blue(
-      '888    888 "Y888888 888     "Y88888 888  888 "Y888888  "Y888'
-    )
-=======
+
     chalk.blue("888    888                      888 888               888")
   );
   console.log(
@@ -180,7 +141,7 @@ function printAsciiLogo() {
   );
   console.log(
     chalk.blue('888    888 "Y888888 888     "Y88888 888  888 "Y888888  "Y888')
->>>>>>> Stashed changes
+
   );
   console.log("");
 }
@@ -189,11 +150,8 @@ async function printWelcomeMessage() {
   const packageJson = await getPackageJson();
 
   console.log(
-<<<<<<< Updated upstream
-    picocolors.cyan(
-=======
     chalk.cyan(
->>>>>>> Stashed changes
+
       `${emoji("👷 ")}Welcome to ${HARDHAT_NAME} v${packageJson.version}${emoji(
         " 👷‍"
       )}\n`
@@ -266,11 +224,9 @@ Please delete or rename ${pluralize(
       "it",
       "them"
     )} and try again.`;
-<<<<<<< Updated upstream
-    console.log(picocolors.red(errorMsg));
-=======
+
     console.log(chalk.red(errorMsg));
->>>>>>> Stashed changes
+
     process.exit(1);
   }
 
@@ -324,11 +280,7 @@ async function printRecommendedDepsInstallationInstructions(
 // exported so we can test that it uses the latest supported version of solidity
 export const EMPTY_HARDHAT_CONFIG = `/** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
-<<<<<<< Updated upstream
-  solidity: "0.8.28",
-=======
   solidity: "0.8.19",
->>>>>>> Stashed changes
 };
 `;
 
@@ -430,19 +382,7 @@ async function createPackageJson() {
 
 function showStarOnGitHubMessage() {
   console.log(
-<<<<<<< Updated upstream
-    picocolors.cyan("Give Hardhat a star on Github if you're enjoying it!") +
-      emoji(" ⭐️✨")
-  );
-  console.log();
-  console.log(
-    picocolors.cyan("     https://github.com/NomicFoundation/hardhat")
-  );
-}
 
-export function showSoliditySurveyMessage() {
-  if (new Date() > new Date("2025-01-31 23:39")) {
-=======
     chalk.cyan("Give Hardhat a star on Github if you're enjoying it!") +
       emoji(" ⭐️✨")
   );
@@ -452,20 +392,17 @@ export function showSoliditySurveyMessage() {
 
 export function showSoliditySurveyMessage() {
   if (new Date() > new Date("2024-01-07 23:39")) {
->>>>>>> Stashed changes
+
     // the survey has finished
     return;
   }
 
   console.log();
   console.log(
-<<<<<<< Updated upstream
-    picocolors.cyan(
-      "Please take a moment to complete the 2024 Solidity Survey: https://hardhat.org/solidity-survey-2024"
-=======
+
     chalk.cyan(
       "Please take a moment to complete the 2023 Solidity Survey: https://hardhat.org/solidity-survey-2023"
->>>>>>> Stashed changes
+
     )
   );
 }
@@ -498,11 +435,8 @@ export async function createProject() {
   if (action === Action.CREATE_EMPTY_HARDHAT_CONFIG_ACTION) {
     await writeEmptyHardhatConfig(isEsm);
     console.log(
-<<<<<<< Updated upstream
-      `${emoji("✨ ")}${picocolors.cyan(`Config file created`)}${emoji(" ✨")}`
-=======
+
       `${emoji("✨ ")}${chalk.cyan(`Config file created`)}${emoji(" ✨")}`
->>>>>>> Stashed changes
     );
 
     if (!isInstalled(HARDHAT_PACKAGE_NAME)) {
@@ -601,13 +535,8 @@ export async function createProject() {
 
         if (!installed) {
           console.warn(
-<<<<<<< Updated upstream
-            picocolors.red(
-              "Failed to install the sample project's dependencies"
-            )
-=======
+
             chalk.red("Failed to install the sample project's dependencies")
->>>>>>> Stashed changes
           );
         }
 
@@ -622,23 +551,17 @@ export async function createProject() {
   }
 
   console.log(
-<<<<<<< Updated upstream
-    `\n${emoji("✨ ")}${picocolors.cyan("Project created")}${emoji(" ✨")}`
-=======
+
     `\n${emoji("✨ ")}${chalk.cyan("Project created")}${emoji(" ✨")}`
->>>>>>> Stashed changes
   );
   console.log();
   console.log("See the README.md file for some example tasks you can run");
   console.log();
   showStarOnGitHubMessage();
   showSoliditySurveyMessage();
-<<<<<<< Updated upstream
 
   const hardhat3BannerManager = await BannerManager.getInstance();
   await hardhat3BannerManager.showBanner();
-=======
->>>>>>> Stashed changes
 }
 
 async function canInstallRecommendedDeps() {
@@ -657,33 +580,13 @@ function isInstalled(dep: string) {
   return dep in allDependencies;
 }
 
-<<<<<<< Updated upstream
-function getProjectTypeFromUserAgent() {
-  const userAgent = process.env.npm_config_user_agent;
-  // Get first part of user agent string
-  const [projectType] = userAgent?.split("/") ?? [];
-  return projectType;
-}
 
-async function isYarnProject() {
-  return (
-    getProjectTypeFromUserAgent() === "yarn" || fsExtra.pathExists("yarn.lock")
-  );
-}
-
-async function isPnpmProject() {
-  return (
-    getProjectTypeFromUserAgent() === "pnpm" ||
-    fsExtra.pathExists("pnpm-lock.yaml")
-  );
-=======
 async function isYarnProject() {
   return fsExtra.pathExists("yarn.lock");
 }
 
 async function isPnpmProject() {
   return fsExtra.pathExists("pnpm-lock.yaml");
->>>>>>> Stashed changes
 }
 
 async function getProjectPackageManager(): Promise<PackageManager> {
@@ -705,17 +608,10 @@ async function doesNpmAutoInstallPeerDependencies() {
 async function installRecommendedDependencies(dependencies: Dependencies) {
   console.log("");
 
-<<<<<<< Updated upstream
+
   const installCmd = await getRecommendedDependenciesInstallationCommand(
     dependencies
-=======
-  // The reason we don't quote the dependencies here is because they are going
-  // to be used in child_process.spawn, which doesn't require escaping string,
-  // and can actually fail if you do.
-  const installCmd = await getRecommendedDependenciesInstallationCommand(
-    dependencies,
-    false
->>>>>>> Stashed changes
+
   );
   return installDependencies(installCmd[0], installCmd.slice(1));
 }
@@ -753,18 +649,17 @@ async function installDependencies(
 }
 
 async function getRecommendedDependenciesInstallationCommand(
-<<<<<<< Updated upstream
+
   dependencies: Dependencies
 ): Promise<string[]> {
   const deps = Object.entries(dependencies).map(
     ([name, version]) => `"${name}@${version}"`
-=======
+
   dependencies: Dependencies,
   quoteDependencies = true
 ): Promise<string[]> {
   const deps = Object.entries(dependencies).map(([name, version]) =>
     quoteDependencies ? `"${name}@${version}"` : `${name}@${version}`
->>>>>>> Stashed changes
   );
 
   if (await isYarnProject()) {

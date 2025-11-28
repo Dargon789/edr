@@ -1,18 +1,13 @@
-<<<<<<< Updated upstream
 import { HARDHAT_MEMPOOL_SUPPORTED_ORDERS } from "../../constants";
-=======
 import type { ReturnData } from "./return-data";
-
 import { Block } from "@nomicfoundation/ethereumjs-block";
 import { RunBlockResult } from "@nomicfoundation/ethereumjs-vm";
-
 import { HARDHAT_MEMPOOL_SUPPORTED_ORDERS } from "../../constants";
 import { BuildInfo, HardhatNetworkChainsConfig } from "../../../types";
 import { MessageTrace } from "../stack-traces/message-trace";
 import { RandomBufferGenerator } from "./utils/random";
 
 export type NodeConfig = LocalNodeConfig | ForkedNodeConfig;
-
 export function isForkedNodeConfig(
   config: NodeConfig
 ): config is ForkedNodeConfig {
@@ -39,16 +34,12 @@ interface CommonConfig {
 }
 
 export type LocalNodeConfig = CommonConfig;
->>>>>>> Stashed changes
-
 export interface ForkConfig {
   jsonRpcUrl: string;
   blockNumber?: number;
   httpHeaders?: { [name: string]: string };
 }
 
-<<<<<<< Updated upstream
-=======
 export interface ForkedNodeConfig extends CommonConfig {
   forkConfig: ForkConfig;
   forkCachePath?: string;
@@ -58,20 +49,15 @@ export interface TracingConfig {
   buildInfos?: BuildInfo[];
 }
 
->>>>>>> Stashed changes
 export type IntervalMiningConfig = number | [number, number];
-
 export type MempoolOrder = typeof HARDHAT_MEMPOOL_SUPPORTED_ORDERS[number];
 
 export interface GenesisAccount {
   privateKey: string;
   balance: string | number | bigint;
 }
-<<<<<<< Updated upstream
-=======
 
 export type AccessListBufferItem = [Buffer, Buffer[]];
-
 export interface CallParams {
   to?: Buffer;
   from: Buffer;
@@ -173,4 +159,3 @@ export interface FeeHistory {
   gasUsedRatio: number[];
   reward?: bigint[][];
 }
->>>>>>> Stashed changes

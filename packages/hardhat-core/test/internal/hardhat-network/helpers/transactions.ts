@@ -1,12 +1,11 @@
-<<<<<<< Updated upstream
+
 import { numberToRpcQuantity } from "../../../../src/internal/core/jsonrpc/types/base-types";
 import { EthereumProvider } from "../../../../src/types";
-
 import {
   DEFAULT_ACCOUNTS_ADDRESSES,
   DEFAULT_BLOCK_GAS_LIMIT,
 } from "./providers";
-=======
+
 import { Transaction } from "@nomicfoundation/ethereumjs-tx";
 import {
   bufferToHex,
@@ -27,7 +26,6 @@ import {
 } from "./providers";
 import { getPendingBaseFeePerGas } from "./getPendingBaseFeePerGas";
 import { retrieveCommon } from "./retrieveCommon";
->>>>>>> Stashed changes
 
 export async function deployContract(
   provider: EthereumProvider,
@@ -50,8 +48,6 @@ export async function deployContract(
 
   return contractAddress;
 }
-<<<<<<< Updated upstream
-=======
 
 export async function sendTxToZeroAddress(
   provider: EthereumProvider,
@@ -171,4 +167,3 @@ export async function sendDeploymentTx(
 
   return contractAddress;
 }
->>>>>>> Stashed changes

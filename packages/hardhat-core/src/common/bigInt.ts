@@ -1,10 +1,8 @@
 import type { BigNumber as EthersBigNumberType } from "ethers-v5";
 // eslint-disable-next-line import/no-extraneous-dependencies
-<<<<<<< Updated upstream
-import type { default as BigNumberJsType } from "bignumber.js";
-=======
+
 import type { BigNumber as BigNumberJsType } from "bignumber.js";
->>>>>>> Stashed changes
+
 // eslint-disable-next-line import/no-extraneous-dependencies
 import type { default as BNType } from "bn.js";
 

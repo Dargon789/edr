@@ -1,16 +1,12 @@
 import type {
   Artifacts,
-<<<<<<< Updated upstream
-=======
   BoundExperimentalHardhatNetworkMessageTraceHook,
->>>>>>> Stashed changes
   EIP1193Provider,
   EthSubscription,
   HardhatNetworkChainsConfig,
   RequestArguments,
 } from "../../../types";
 
-<<<<<<< Updated upstream
 import type {
   EdrContext,
   Provider as EdrProviderT,
@@ -25,21 +21,17 @@ import { EventEmitter } from "events";
 import fsExtra from "fs-extra";
 
 import { requireNapiRsModule } from "../../../common/napi-rs";
-=======
 import { Common } from "@nomicfoundation/ethereumjs-common";
 import chalk from "chalk";
 import debug from "debug";
 import { EventEmitter } from "events";
 import fsExtra from "fs-extra";
 import semver from "semver";
-
->>>>>>> Stashed changes
 import {
   HARDHAT_NETWORK_RESET_EVENT,
   HARDHAT_NETWORK_REVERT_SNAPSHOT_EVENT,
 } from "../../constants";
 import {
-<<<<<<< Updated upstream
   InvalidArgumentsError,
   InvalidInputError,
   ProviderError,
@@ -51,14 +43,13 @@ import { encodeSolidityStackTrace } from "../stack-traces/solidity-errors";
 import { SolidityStackTrace } from "../stack-traces/solidity-stack-trace";
 
 import { getPackageJson } from "../../util/packageInfo";
-=======
   InvalidInputError,
   MethodNotFoundError,
   MethodNotSupportedError,
   ProviderError,
-} from "../../core/providers/errors";
+} 
+from "../../core/providers/errors";
 import { Mutex } from "../../vendor/await-semaphore";
-
 import { FIRST_SOLC_VERSION_SUPPORTED } from "../stack-traces/constants";
 import { MiningTimer } from "./MiningTimer";
 import { DebugModule } from "./modules/debug";
@@ -70,13 +61,11 @@ import { PersonalModule } from "./modules/personal";
 import { NetModule } from "./modules/net";
 import { Web3Module } from "./modules/web3";
 import { HardhatNode } from "./node";
->>>>>>> Stashed changes
 import {
   ForkConfig,
   GenesisAccount,
   IntervalMiningConfig,
   MempoolOrder,
-<<<<<<< Updated upstream
 } from "./node-types";
 import {
   edrRpcDebugTraceToHardhat,
@@ -110,10 +99,10 @@ export function getGlobalEdrContext(): EdrContext {
 
   return _globalEdrContext;
 }
-=======
   NodeConfig,
   TracingConfig,
-} from "./node-types";
+} 
+from "./node-types";
 
 const log = debug("hardhat:core:hardhat-network:provider");
 
@@ -126,7 +115,7 @@ const PRIVATE_RPC_METHODS = new Set([
 /* eslint-disable @nomicfoundation/hardhat-internal-rules/only-hardhat-error */
 
 export const DEFAULT_COINBASE = "0xc014ba5ec014ba5ec014ba5ec014ba5ec014ba5e";
->>>>>>> Stashed changes
+
 
 interface HardhatNetworkProviderConfig {
   hardfork: string;
@@ -147,7 +136,6 @@ interface HardhatNetworkProviderConfig {
   initialBaseFeePerGas?: number;
   initialDate?: Date;
   coinbase?: string;
-<<<<<<< Updated upstream
   forkConfig?: ForkConfig;
   forkCachePath?: string;
   enableTransientStorage: boolean;
@@ -178,7 +166,7 @@ export class EdrProviderWrapper
     private readonly _node: {
       _vm: MinimalEthereumJsVm;
     }
-=======
+
   experimentalHardhatNetworkMessageTraceHooks?: BoundExperimentalHardhatNetworkMessageTraceHook[];
   forkConfig?: ForkConfig;
   forkCachePath?: string;
@@ -205,12 +193,10 @@ export class HardhatNetworkProvider
     private readonly _config: HardhatNetworkProviderConfig,
     private readonly _logger: ModulesLogger,
     private readonly _artifacts?: Artifacts
->>>>>>> Stashed changes
   ) {
     super();
   }
 
-<<<<<<< Updated upstream
   public static async create(
     config: HardhatNetworkProviderConfig,
     loggerConfig: LoggerConfig,
@@ -347,18 +333,17 @@ export class HardhatNetworkProvider
   }
 
   public async request(args: RequestArguments): Promise<unknown> {
-=======
+
   public async request(args: RequestArguments): Promise<unknown> {
     const release = await this._mutex.acquire();
 
->>>>>>> Stashed changes
     if (args.params !== undefined && !Array.isArray(args.params)) {
       throw new InvalidInputError(
         "Hardhat Network doesn't support JSON-RPC params sent as an object"
       );
     }
 
-<<<<<<< Updated upstream
+
     const params = args.params ?? [];
 
     if (args.method === "hardhat_getStackTraceFailuresCount") {
@@ -510,7 +495,6 @@ export class HardhatNetworkProvider
     }
   }
 
-=======
     try {
       let result;
       if (this._logger.isEnabled() && !PRIVATE_RPC_METHODS.has(args.method)) {
@@ -768,7 +752,6 @@ export class HardhatNetworkProvider
     this._emitEip1193SubscriptionEvent(subscription, result);
   };
 
->>>>>>> Stashed changes
   private _emitLegacySubscriptionEvent(subscription: string, result: any) {
     this.emit("notification", {
       subscription,
@@ -788,7 +771,6 @@ export class HardhatNetworkProvider
     this.emit("message", message);
   }
 }
-<<<<<<< Updated upstream
 
 async function clientVersion(edrClientVersion: string): Promise<string> {
   const hardhatPackage = await getPackageJson();
@@ -842,5 +824,3 @@ async function makeTracingConfig(
     }
   }
 }
-=======
->>>>>>> Stashed changes

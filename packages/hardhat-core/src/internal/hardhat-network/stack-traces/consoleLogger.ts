@@ -1,19 +1,17 @@
 import {
-<<<<<<< Updated upstream
+
   bytesToBigInt,
   bytesToHex as bufferToHex,
   bytesToInt,
   fromSigned,
 } from "@ethereumjs/util";
-=======
+
   bufferToBigInt,
   bufferToHex,
   bufferToInt,
   fromSigned,
 } from "@nomicfoundation/ethereumjs-util";
->>>>>>> Stashed changes
 import util from "util";
-
 import {
   AddressTy,
   BoolTy,
@@ -50,7 +48,6 @@ import {
   Bytes8Ty,
   Bytes9Ty,
   BytesTy,
-<<<<<<< Updated upstream
   Int256Ty,
   StringTy,
   Uint256Ty,
@@ -107,7 +104,7 @@ export class ConsoleLogger {
 
     /**
      * The first argument is interpreted as the format string, which may need adjusting.
-=======
+
   ConsoleLogs,
   Int256Ty,
   StringTy,
@@ -209,7 +206,6 @@ export class ConsoleLogger {
 
   private _replaceNumberFormatSpecifiers(consoleLogs: ConsoleLogs) {
     /**
->>>>>>> Stashed changes
      * Replace the occurrences of %d and %i with %s. This is necessary because if the arguments passed are numbers,
      * they could be too large to be formatted as a Number or an Integer, so it is safer to use a String.
      * %d and %i are replaced only if there is an odd number of % before the d or i.
@@ -221,38 +217,34 @@ export class ConsoleLogger {
      * (?<!%) negative look-behind to make this work.
      * The (?:) is just to avoid capturing that inner group.
      */
-<<<<<<< Updated upstream
+
     if (decodedArgs.length > 0) {
       decodedArgs[0] = decodedArgs[0].replace(
-=======
     if (consoleLogs.length > 0 && typeof consoleLogs[0] === "string") {
       consoleLogs[0] = consoleLogs[0].replace(
->>>>>>> Stashed changes
+    if (consoleLogs.length > 0 && typeof consoleLogs[0] === "string") {
+      consoleLogs[0] = consoleLogs[0].replace(
         /((?<!%)(?:%%)*)(%[di])/g,
         "$1%s"
       );
     }
-<<<<<<< Updated upstream
 
     return decodedArgs;
   }
 
   /** Decodes calldata parameters from `data` according to `types` into their string representation. */
   private static _decode(data: Buffer, types: string[]): string[] {
-=======
   }
 
   private _decode(data: Buffer, types: string[]): ConsoleLogs {
->>>>>>> Stashed changes
+  }
+
+  private _decode(data: Buffer, types: string[]): ConsoleLogs {
     return types.map((type, i) => {
       const position: number = i * 32;
       switch (types[i]) {
         case Uint256Ty:
-<<<<<<< Updated upstream
-          return bytesToBigInt(
-=======
           return bufferToBigInt(
->>>>>>> Stashed changes
             data.slice(position, position + REGISTER_SIZE)
           ).toString(10);
 
@@ -268,17 +260,10 @@ export class ConsoleLogger {
           return "false";
 
         case StringTy:
-<<<<<<< Updated upstream
-          const sStart = bytesToInt(
-            data.slice(position, position + REGISTER_SIZE)
-          );
-          const sLen = bytesToInt(data.slice(sStart, sStart + REGISTER_SIZE));
-=======
           const sStart = bufferToInt(
             data.slice(position, position + REGISTER_SIZE)
           );
           const sLen = bufferToInt(data.slice(sStart, sStart + REGISTER_SIZE));
->>>>>>> Stashed changes
           return data
             .slice(sStart + REGISTER_SIZE, sStart + REGISTER_SIZE + sLen)
             .toString();
@@ -289,17 +274,14 @@ export class ConsoleLogger {
           );
 
         case BytesTy:
-<<<<<<< Updated upstream
           const bStart = bytesToInt(
             data.slice(position, position + REGISTER_SIZE)
           );
           const bLen = bytesToInt(data.slice(bStart, bStart + REGISTER_SIZE));
-=======
           const bStart = bufferToInt(
             data.slice(position, position + REGISTER_SIZE)
           );
           const bLen = bufferToInt(data.slice(bStart, bStart + REGISTER_SIZE));
->>>>>>> Stashed changes
           return bufferToHex(
             data.slice(bStart + REGISTER_SIZE, bStart + REGISTER_SIZE + bLen)
           );

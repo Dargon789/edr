@@ -1,15 +1,15 @@
 import {
-<<<<<<< Updated upstream
   bytesToHex as bufferToHex,
   isValidAddress,
   toBytes,
 } from "@ethereumjs/util";
-=======
   bufferToHex,
   isValidAddress,
   toBuffer,
-} from "@nomicfoundation/ethereumjs-util";
->>>>>>> Stashed changes
+} 
+
+from "@nomicfoundation/ethereumjs-util";
+
 import * as t from "io-ts";
 
 import * as BigIntUtils from "../../../util/bigint";
@@ -29,7 +29,6 @@ export const rpcQuantity = new t.Type<bigint>(
 export const rpcData = new t.Type<Buffer>(
   "DATA",
   Buffer.isBuffer,
-<<<<<<< Updated upstream
   (u, c) =>
     isRpcDataString(u) ? t.success(Buffer.from(toBytes(u))) : t.failure(u, c),
   t.identity
@@ -42,19 +41,14 @@ export const rpcParity = new t.Type<Buffer>(
     isRpcParityString(u) ? t.success(Buffer.from(toBytes(u))) : t.failure(u, c),
 =======
   (u, c) => (isRpcDataString(u) ? t.success(toBuffer(u)) : t.failure(u, c)),
->>>>>>> Stashed changes
   t.identity
 );
 
 export const rpcHash = new t.Type<Buffer>(
   "HASH",
   (v): v is Buffer => Buffer.isBuffer(v) && v.length === HASH_LENGTH_BYTES,
-<<<<<<< Updated upstream
-  (u, c) =>
-    isRpcHashString(u) ? t.success(Buffer.from(toBytes(u))) : t.failure(u, c),
-=======
+
   (u, c) => (isRpcHashString(u) ? t.success(toBuffer(u)) : t.failure(u, c)),
->>>>>>> Stashed changes
   t.identity
 );
 
@@ -121,14 +115,13 @@ function validateStorageSlot(u: unknown, c: t.Context): t.Validation<bigint> {
 export const rpcAddress = new t.Type<Buffer>(
   "ADDRESS",
   (v): v is Buffer => Buffer.isBuffer(v) && v.length === ADDRESS_LENGTH_BYTES,
-<<<<<<< Updated upstream
+
   (u, c) =>
     isRpcAddressString(u)
       ? t.success(Buffer.from(toBytes(u)))
       : t.failure(u, c),
-=======
+
   (u, c) => (isRpcAddressString(u) ? t.success(toBuffer(u)) : t.failure(u, c)),
->>>>>>> Stashed changes
   t.identity
 );
 
@@ -205,11 +198,10 @@ export function rpcDataToBigInt(data: string): bigint {
 }
 
 export function bufferToRpcData(
-<<<<<<< Updated upstream
+
   buffer: Uint8Array,
-=======
   buffer: Buffer,
->>>>>>> Stashed changes
+
   padToBytes: number = 0
 ): string {
   let s = bufferToHex(buffer);
@@ -227,11 +219,10 @@ export function rpcDataToBuffer(data: string): Buffer {
     });
   }
 
-<<<<<<< Updated upstream
+
   return Buffer.from(toBytes(data));
-=======
+
   return toBuffer(data);
->>>>>>> Stashed changes
 }
 
 // Type guards
@@ -251,13 +242,7 @@ function isRpcDataString(u: unknown): u is string {
   return typeof u === "string" && u.match(/^0x(?:[0-9a-fA-F]{2})*$/) !== null;
 }
 
-<<<<<<< Updated upstream
-function isRpcParityString(u: unknown): u is string {
-  return typeof u === "string" && u.match(/^0x[0-9a-fA-F]{1,2}$/) !== null;
-}
 
-=======
->>>>>>> Stashed changes
 function isRpcHashString(u: unknown): u is string {
   return typeof u === "string" && u.length === 66 && isRpcDataString(u);
 }

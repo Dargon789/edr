@@ -1,31 +1,23 @@
 import {
-<<<<<<< Updated upstream
   bytesToHex as bufferToHex,
   privateToAddress,
   toBytes,
 } from "@ethereumjs/util";
-=======
   bufferToHex,
   privateToAddress,
   toBuffer,
 } from "@nomicfoundation/ethereumjs-util";
->>>>>>> Stashed changes
 
 import {
   HardhatNetworkMempoolConfig,
   HardhatNetworkMiningConfig,
 } from "../../../../src/types";
 import { ALCHEMY_URL, INFURA_URL } from "../../../setup";
-
 import { useProvider, UseProviderOptions } from "./useProvider";
-
-<<<<<<< Updated upstream
 function toBuffer(x: Parameters<typeof toBytes>[0]) {
   return Buffer.from(toBytes(x));
 }
 
-=======
->>>>>>> Stashed changes
 export const DEFAULT_HARDFORK = "shanghai";
 export const DEFAULT_CHAIN_ID = 123;
 export const DEFAULT_NETWORK_ID = 234;
@@ -108,11 +100,9 @@ export const INTERVAL_MINING_PROVIDERS = [
         loggerEnabled: true,
         mining: {
           auto: false,
-<<<<<<< Updated upstream
           interval: 100,
-=======
           interval: 10000,
->>>>>>> Stashed changes
+          interval: 10000,
           mempool: DEFAULT_MEMPOOL_CONFIG,
         },
         ...options,
@@ -129,11 +119,9 @@ export const INTERVAL_MINING_PROVIDERS = [
         loggerEnabled: true,
         mining: {
           auto: false,
-<<<<<<< Updated upstream
           interval: 100,
-=======
           interval: 10000,
->>>>>>> Stashed changes
+          interval: 10000,
           mempool: DEFAULT_MEMPOOL_CONFIG,
         },
         ...options,
@@ -178,11 +166,9 @@ if (ALCHEMY_URL !== undefined) {
         forkConfig: { jsonRpcUrl: url, blockNumber: options.forkBlockNumber },
         mining: {
           auto: false,
-<<<<<<< Updated upstream
           interval: 100,
-=======
           interval: 10000,
->>>>>>> Stashed changes
+          interval: 10000,
           mempool: DEFAULT_MEMPOOL_CONFIG,
         },
         ...options,

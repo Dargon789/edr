@@ -1,5 +1,4 @@
 {
-<<<<<<< Updated upstream
   "name": "hardhat",
   "version": "2.23.0",
   "author": "Nomic Labs LLC",
@@ -175,11 +174,9 @@
     ],
     "all": true
   }
-=======
   "name": "hardhat-core",
   "packageManager": "yarn@4.7.0",
   "workspaces": [
     "packages/*"
   ]
->>>>>>> Stashed changes
 }

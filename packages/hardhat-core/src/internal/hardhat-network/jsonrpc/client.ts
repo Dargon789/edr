@@ -1,8 +1,5 @@
-<<<<<<< Updated upstream
 import { Address, bytesToHex as bufferToHex } from "@ethereumjs/util";
-=======
 import { Address, bufferToHex } from "@nomicfoundation/ethereumjs-util";
->>>>>>> Stashed changes
 import fsExtra from "fs-extra";
 import * as t from "io-ts";
 import path from "path";
@@ -24,12 +21,9 @@ import { rpcTransactionReceipt } from "../../core/jsonrpc/types/output/receipt";
 import { rpcTransaction } from "../../core/jsonrpc/types/output/transaction";
 import { HttpProvider } from "../../core/providers/http";
 import { createNonCryptographicHashBasedIdentifier } from "../../util/hash";
-<<<<<<< Updated upstream
 import { nullable } from "../../util/io-ts";
-=======
 import { nullable, optional } from "../../util/io-ts";
 import { FeeHistory } from "../provider/node-types";
->>>>>>> Stashed changes
 
 export class JsonRpcClient {
   private _cache: Map<string, any> = new Map();
@@ -144,11 +138,11 @@ export class JsonRpcClient {
     );
   }
 
-<<<<<<< Updated upstream
+
   public async getTransactionCount(address: Uint8Array, blockNumber: bigint) {
-=======
+
   public async getTransactionCount(address: Buffer, blockNumber: bigint) {
->>>>>>> Stashed changes
+
     return this._perform(
       "eth_getTransactionCount",
       [bufferToHex(address), numberToRpcQuantity(blockNumber)],
@@ -169,13 +163,8 @@ export class JsonRpcClient {
   public async getLogs(options: {
     fromBlock: bigint;
     toBlock: bigint;
-<<<<<<< Updated upstream
-    address?: Uint8Array | Uint8Array[];
-    topics?: Array<Array<Uint8Array | null> | null>;
-=======
     address?: Buffer | Buffer[];
     topics?: Array<Array<Buffer | null> | null>;
->>>>>>> Stashed changes
   }) {
     let address: string | string[] | undefined;
     if (options.address !== undefined) {
@@ -239,8 +228,6 @@ export class JsonRpcClient {
     };
   }
 
-<<<<<<< Updated upstream
-=======
   // This is part of a temporary fix to https://github.com/NomicFoundation/hardhat/issues/2380
   // This method caches each request instead of caching each block's fee info individually, which is not ideal
   public async getFeeHistory(
@@ -267,7 +254,6 @@ export class JsonRpcClient {
     );
   }
 
->>>>>>> Stashed changes
   public async getLatestBlockNumber(): Promise<bigint> {
     return this._perform(
       "eth_blockNumber",
