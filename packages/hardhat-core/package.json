@@ -1,0 +1,7 @@
+{
+  "name": "hardhat-core",
+  "packageManager": "yarn@4.7.0",
+  "workspaces": [
+    "packages/*"
+  ]
+}
