@@ -3,13 +3,10 @@ name: E2E tests
 on:
   push:
     branches:
-      - main
+      - "main"
   pull_request:
     branches:
-      - main
-
-permissions:
-  contents: read
+      - "main"
 
 jobs:
   run-e2e:
@@ -32,7 +29,12 @@ jobs:
       IS_WINDOWS: ${{ matrix.os == 'windows-latest' }}
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup-env
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 18
       - name: Run fixture-projects script
         run: |
           cd e2e

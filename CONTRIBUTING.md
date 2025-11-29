@@ -22,11 +22,11 @@ To install the project's dependencies, run `pnpm i` in the root directory of the
 
 ## Building the projects
 
-Plugins require hardhat to be built or tested. Our recommendation is to run `pnpm watch` from the root folder. This will keep everything compiled, and these problems will be avoided.
+Plugins require hardhat to be built or tested. Our recommendation is to run `pnpm build` from the root folder.
 
 ## Testing
 
-All tests are written using [mocha](https://mochajs.org) and [chai](https://www.chaijs.com).
+All tests are written using [node test runner](https://nodejs.org/api/test.html).
 
 ### Per-package
 
@@ -95,7 +95,7 @@ This is a list of the modules that always get loaded during startup:
 
 ## Developing locally
 
-All these tips assume you are running `pnpm watch` from the root directory.
+The project can be built by `pnpm build` from the root directory.
 
 ### Linking
 
@@ -119,8 +119,8 @@ Unlike linking, if you make a change in the code, you'll need to repeat the proc
 
 An even more realistic way of using your local changes in a project is to use [`pnpm pack`](https://pnpm.io/cli/pack):
 
-1. Go to `packages/hardhat-core` and run `pnpm pack`. This will create a `nomiclabs-hardhat-x.y.z.tgz` file in that directory.
-2. Go to some hardhat project and run `npm install /path/to/hardhat/packages/hardhat/nomiclabs-hardhat-x.y.z.tgz`.
+1. Go to `packages/hardhat-core` and run `pnpm pack`. This will create a `hardhat-x.y.z.tgz` file in that directory.
+2. Go to some hardhat project and run `npm install /path/to/hardhat/packages/hardhat-core/hardhat-x.y.z.tgz`.
 
 Unlike linking, if you make a change in the code, you'll need to repeat the process.
 
@@ -139,3 +139,32 @@ When tests are run, Hardhat gets initialized multiple times, and that means unlo
 This problem is normally not present if you are monkey-patching an object that you initialized, but it is when monkey-patching a class, its prototype, or a singleton object initialized by the library itself.
 
 For an example on how to do it properly, please take a look at the `hardhat-truffle5` plugin.
+
+## Note about small PRs and airdrop farming
+
+We generally really appreciate external contributions, and strongly encourage meaningful additions and fixes! However, due to a recent increase in small PRs potentially created to farm airdrops, we might need to close a PR without explanation if any of the following apply:
+
+- It is a change of very minor value that still requires additional review time/fixes (e.g. PRs fixing trivial spelling errors that can’t be merged in less than a couple of minutes due to incorrect suggestions)
+- It introduces inconsequential changes (e.g. rewording phrases)
+- The author of the PR does not respond in a timely manner
+- We suspect the Github account of the author was created for airdrop farming
+
+## Contributing Checklist
+
+Shortlist of steps that should be always considered when committing changes. All errors reported by any command must be resolved before moving ahead.
+
+> All commands expect that they are executed from the root of the repository.
+
+1) `pnpm build` - build the entire project
+2) `pnpm lint` - check formatting and code structure
+3) `pnpm lint:fix` - fix formatting issues
+4) `pnpm test` - run all tests
+
+Commit changes and create a PR once all the commands above are successful. The CI pipeline would block the PR otherwise.
+
+5) Create a branch for the change
+   * there is a `Create a branch` option in the `Development` section in case the change is tracked by an issue
+6) Create a PR from the new branch to `main`
+   * Add description that explains the change
+
+
