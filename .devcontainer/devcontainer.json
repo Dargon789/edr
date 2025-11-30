@@ -3,12 +3,10 @@
   "image": "mcr.microsoft.com/devcontainers/base:bullseye",
   "features": {
     "ghcr.io/devcontainers/features/node:1": {
-      "version": "24"
+      "version": "18"
     }
   },
-  "onCreateCommand": "scripts/setup.sh",
-  "postCreateCommand": "pnpm install --frozen-lockfile",
-  "waitFor": "postCreateCommand",
+  "postCreateCommand": "scripts/setup.sh",
   "containerEnv": {
     "ALCHEMY_URL": "${localEnv:ALCHEMY_URL}",
     "INFURA_URL": "${localEnv:INFURA_URL}"

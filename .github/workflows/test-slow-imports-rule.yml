@@ -3,8 +3,6 @@
 # that we got a non-zero exit code. It's not a completely fault-proof strategy,
 # but it's an useful smoke test.
 name: Slow imports rule check
-permissions:
-  contents: read
 
 on:
   schedule:
@@ -24,13 +22,7 @@ jobs:
     runs-on: "ubuntu-latest"
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v2
-        with:
-          version: 9
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 18
-          cache: "pnpm"
+      - uses: ./.github/actions/setup-env
       - name: Install
         run: pnpm install --frozen-lockfile --prefer-offline
       - name: Add slow import

@@ -2,15 +2,11 @@
 # as "no changeset needed"
 
 name: Check that the PR has a changeset
-permissions:
-  contents: read
 
 on:
-  merge_group:
   pull_request:
     branches:
       - main
-      - v2
     types:
       - opened
       - synchronize
@@ -22,19 +18,40 @@ jobs:
   check-if-changeset:
     name: Check that PR has a changeset
     runs-on: ubuntu-latest
+    # don't run this check in the changesets PR
+    if: github.head_ref != 'changeset-release/main'
     steps:
-      - name: Checkout the repository
-        uses: actions/checkout@v5
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const pullNumber = context.issue.number;
 
-      # We need to fetch the base ref because the pull request check inspects the diff between the head and the base ref
-      - run: git fetch origin "$GITHUB_BASE_REF":"$GITHUB_BASE_REF"
+            const { data: files } = await github.rest.pulls.listFiles({
+              ...context.issue,
+              pull_number: pullNumber
+            });
+            const changeset = files.find(
+              file => file.status === "added" && file.filename.startsWith(".changeset/")
+            );
+            if (changeset !== undefined) {
+              console.log("Changeset found:", changeset.filename);
+              return;
+            }
 
-      - name: Check if merge group is valid
-        if: github.event_name == 'merge_group'
-        run: node scripts/validate-merge-group.mjs
+            console.log("No changeset found");
 
-      - name: Check if PR has a changeset
-        if: github.event_name == 'pull_request'
-        env:
-          GITHUB_EVENT_PULL_REQUEST_LABELS: ${{ toJson(github.event.pull_request.labels) }}
-        run: node scripts/validate-pull-request-changeset.mjs
+
+            const { data: pull } = await github.rest.pulls.get({
+              ...context.issue,
+              pull_number: pullNumber
+            });
+            const noChangesetNeededLabel = pull.labels
+              .some(l => l.name === "no changeset needed");
+            if (noChangesetNeededLabel) {
+              console.log('The PR is labeled as "no changeset needed"');
+              return;
+            }
+
+            console.log('The PR is not labeled as "no changeset needed"');
+
+            process.exit(1);

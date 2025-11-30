@@ -1,6 +1,6 @@
-name: hardhat-core CI
 permissions:
   contents: read
+name: hardhat-core CI
 
 # Note: this workflow uses `macos-13` to use x86
 
@@ -14,14 +14,17 @@ on:
       - "packages/hardhat-core/**"
       - "packages/hardhat-common/**"
   pull_request:
-    branches:
-      - "**"
     paths:
       - ".github/workflows/hardhat-core-ci.yml"
       - "config/**"
       - "packages/hardhat-core/**"
       - "packages/hardhat-common/**"
   workflow_dispatch:
+    inputs:
+      test-all-solc-versions:
+        description: Test all solc versions
+        required: false
+        default: "false"
 
 defaults:
   run:
@@ -41,16 +44,11 @@ jobs:
         node: [18.15]
         os: ["macos-13", "ubuntu-latest", "windows-latest"]
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v2
-        with:
-          version: 9
-      - name: Install Node
-        uses: actions/setup-node@v4
+      - uses: ./.github/actions/setup-env
         with:
           node-version: ${{ matrix.node }}
-          cache: pnpm
 
       - name: Install package
         run: pnpm install --frozen-lockfile --prefer-offline
@@ -72,6 +70,7 @@ jobs:
           DO_NOT_SET_THIS_ENV_VAR____IS_HARDHAT_CI: true
           FORCE_COLOR: 3
           NODE_OPTIONS: --max-old-space-size=4096
+          HARDHAT_TESTS_ALL_SOLC_VERSIONS: ${{ github.event.inputs.test-all-solc-versions}}
         run: pnpm test:except-provider
 
   test-provider:
@@ -83,22 +82,17 @@ jobs:
         node: [18.15]
         os: ["macos-13", "ubuntu-latest", "windows-latest"]
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v2
-        with:
-          version: 9
-      - name: Install Node
-        uses: actions/setup-node@v4
+      - uses: ./.github/actions/setup-env
         with:
           node-version: ${{ matrix.node }}
-          cache: pnpm
 
       - name: Install package
         run: pnpm install --frozen-lockfile --prefer-offline
 
       - name: Cache EDR RPC cache
-        uses: actions/cache@v2
+        uses: actions/cache@v4
         with:
           path: |
             packages/hardhat-core/test/internal/hardhat-network/edr-cache
@@ -120,16 +114,14 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
+        # TODO: Currently there is no @types/node for Node 22,
+        # include it when it is available.
         node: [18, 20]
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v2
-        with:
-          version: 9
-      - uses: actions/setup-node@v4
+      - uses: ./.github/actions/setup-env
         with:
           node-version: ${{ matrix.node }}
-          cache: pnpm
       - name: Install
         run: pnpm install --frozen-lockfile --prefer-offline
       - name: Install @types/node
