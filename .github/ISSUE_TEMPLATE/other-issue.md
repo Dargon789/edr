@@ -1,12 +1,10 @@
 ---
 name: Other issue
 about: Other kind of issue. Please don't use this to ask questions.
-title: ''
-labels: ''
-assignees: ''
-
+<<<<<<< Updated upstream
+=======
+title: ""
+labels: ""
+assignees: ""
+>>>>>>> Stashed changes
 ---
-
-### Description
-
-Please provide a clear and concise description of the issue.
