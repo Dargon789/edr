@@ -4,9 +4,6 @@ on:
   push:
     branches:
       - "**"
-    paths:
-      - "docs/**"
-      - "packages/**"
   workflow_dispatch:
 
 concurrency:
@@ -14,8 +11,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
-    name: Check docs site
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
@@ -24,7 +21,7 @@ jobs:
           version: 8
       - uses: actions/setup-node@v2
         with:
-          node-version: 18
+          node-version: 16
           cache: "pnpm"
       - name: Install
         run: pnpm install --frozen-lockfile --prefer-offline
