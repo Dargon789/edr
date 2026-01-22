@@ -159,11 +159,21 @@ jobs:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
-      - name: Ensure npm workspace is unmodified
+      - name: Ensure npm workspace is unmodified and clean
         run: |
           set -euo pipefail
           # Fail if package.json or bun.lockb are different from committed version
           git diff --exit-code ./npm/package.json ./npm/bun.lockb
+          # Ensure npm workspace directory exists
+          if [ ! -d "./npm" ]; then
+            echo "::error::Expected ./npm directory to exist before installing dependencies." >&2
+            exit 1
+          fi
+          # Sanity check: ensure no obvious scripts or executables have appeared in ./npm
+          if find ./npm -type f -regextype posix-extended -regex '.*\.(sh|exe|js|bat|py)$' | grep .; then
+            echo "::error::Detected unexpected script or executable file under ./npm; refusing to run bun install." >&2
+            exit 1
+          fi
 
       - name: Install Dependencies
         working-directory: ./npm
