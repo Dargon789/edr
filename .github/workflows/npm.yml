@@ -230,16 +230,9 @@ jobs:
           fi
           echo "NPM workspace is clean."
 
-      - name: Transpile TS -> JS
-        working-directory: ./npm
-        run: bun run build
+      - name: Derive Release Version from Artifacts
         id: release-version
-        working-directory: ./npm
         env:
-          PROVENANCE: true
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_REGISTRY_URL: ${{ env.NPM_REGISTRY_URL }}
           ARTIFACT_DIR: ${{ steps.paths.outputs.artifact_dir }}
         run: |
           set -euo pipefail
@@ -266,7 +259,7 @@ jobs:
             exit 1
           fi
           version_part=${first_basename#foundry_}
-          export RELEASE_VERSION=${version_part%%_*}
+          RELEASE_VERSION=${version_part%%_*}
           # Validate RELEASE_VERSION: allow "v" optional, then e.g. 1.2.3(-rc.1) etc (semver)
           if ! [[ "$RELEASE_VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([\-+a-zA-Z0-9\.]*)?$ ]]; then
             echo "ERROR: RELEASE_VERSION '$RELEASE_VERSION' does not match expected pattern (semver, e.g. v1.2.3)" >&2
@@ -279,7 +272,17 @@ jobs:
               exit 1
               ;;
           esac
+          # Expose the strictly validated RELEASE_VERSION to later steps
           echo "Detected RELEASE_VERSION=$RELEASE_VERSION"
+
+      - name: Transpile TS -> JS
+        working-directory: ./npm
+        env:
+          PROVENANCE: true
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_REGISTRY_URL: ${{ env.NPM_REGISTRY_URL }}
+        run: bun run build
 
           printf 'RELEASE_VERSION=%s\n' "$RELEASE_VERSION" >>"$GITHUB_OUTPUT"
 
