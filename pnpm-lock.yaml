@@ -236,8 +236,8 @@ importers:
         specifier: ~5.8.2
         version: 5.8.3
       undici:
-        specifier: ^5.14.0
-        version: 5.28.3
+        specifier: ^6.23.0
+        version: 6.23.0
 
   js/benchmark:
     dependencies:
@@ -297,8 +297,8 @@ importers:
         specifier: npm:hardhat@2.28.4
         version: hardhat@2.28.4(patch_hash=8e8a0e953b35c544ee73251efeeff54028265010aa0e1798f8b970bddb9f925f)(ts-node@10.9.2(@types/node@20.16.1)(typescript@5.8.3))(typescript@5.8.3)
       lodash:
-        specifier: ^4.17.11
-        version: 4.17.21
+        specifier: ^4.17.23
+        version: 4.17.23
       prettier:
         specifier: ^3.2.5
         version: 3.2.5
@@ -1947,12 +1947,12 @@ packages:
 
   glob@7.2.0:
     resolution: {integrity: sha512-lmLf6gtyrPq8tTjSmrO94wBeQbFR3HbLHbuyD69wuyQkImp2hWqMGB47OX65FBkPffO641IP9jWa1z4ivqG26Q==}
-    deprecated: Glob versions prior to v9 are no longer supported
+    deprecated: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
 
   glob@8.1.0:
     resolution: {integrity: sha512-r8hpEjiQEYlF2QU0df3dS+nxxSIreXQS1qRhMJM0Q5NDdR386C7jb7Hwwod8Fgiuex+k0GFjgft18yvxm5XoCQ==}
     engines: {node: '>=12'}
-    deprecated: Glob versions prior to v9 are no longer supported
+    deprecated: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
 
   globals@13.24.0:
     resolution: {integrity: sha512-AhO5QUcj8llrbG09iWhPU2B204J1xnPeL8kQmVorSsy+Sjj1sk8gIyh6cUocGmH4L0UuhAJy+hJMRA4mgA4mFQ==}
@@ -2303,6 +2303,9 @@ packages:
 
   lodash@4.17.21:
     resolution: {integrity: sha512-v2kDEe57lecTulaDIuNTPy3Ry4gLGJ6Z1O3vE1krgXZNrsQ+LFTGHVxVjcXPs17LhbZVGedAJv8XZ1tvj5FvSg==}
+
+  lodash@4.17.23:
+    resolution: {integrity: sha512-LgVTMpQtIopCi79SJeDiP0TfWi5CNEc/L/aRdTh3yIvmZXTnheWpKjSZhnvMl8iXbC1tFg9gdHHDMLoV7CnG+w==}
 
   log-symbols@4.1.0:
     resolution: {integrity: sha512-8XPvpAA8uyhfteu8pIvQxpJZ7SYYdpUivZpGy6sFsBuKRY/7rQGavedeB8aK+Zkyq6upMFVL/9AW6vOYzfRyLg==}
@@ -3006,12 +3009,12 @@ packages:
   undici-types@6.19.8:
     resolution: {integrity: sha512-ve2KP6f/JnbPBFyobGHuerC9g1FYGn/F8n1LWTwNxCEzd6IfqTwUQcNXgEtmmQ6DlRrC1hrSrBnCZPokRrDHjw==}
 
-  undici@5.28.3:
-    resolution: {integrity: sha512-3ItfzbrhDlINjaP0duwnNsKpDQk3acHI3gVJ1z4fmwMK31k5G9OVIAMLSIaP6w4FaGkaAkN6zaQO9LUvZ1t7VA==}
+  undici@5.29.0:
+    resolution: {integrity: sha512-raqeBD6NQK4SkWhQzeYKd1KmIG6dllBOTt55Rmkt4HtI9mwdWtJljnrXjAFUBLTSN67HWrOIZ3EPF4kjUw80Bg==}
     engines: {node: '>=14.0'}
 
-  undici@6.21.3:
-    resolution: {integrity: sha512-gBLkYIlEnSp8pFbT64yFgGE6UIB9tAkhukC23PmMDCe5Nd+cRqKxSjw5y54MK2AZMgZfJWMaNE4nYUHgi1XEOw==}
+  undici@6.23.0:
+    resolution: {integrity: sha512-VfQPToRA5FZs/qJxLIinmU59u0r7LXqoJkCzinq3ckNJp3vKEh7jTWN589YQ5+aoAC/TGRLyJLCPKcLQbM8r9g==}
     engines: {node: '>=18.17'}
 
   unicorn-magic@0.1.0:
@@ -3699,7 +3702,7 @@ snapshots:
       ethereum-cryptography: 2.2.1
       fast-equals: 5.2.2
       rfdc: 1.4.1
-      undici: 6.21.3
+      undici: 6.23.0
     transitivePeerDependencies:
       - supports-color
 
@@ -3712,7 +3715,7 @@ snapshots:
       fast-equals: 5.2.2
       json-stream-stringify: 3.1.6
       rfdc: 1.4.1
-      undici: 6.21.3
+      undici: 6.23.0
     transitivePeerDependencies:
       - supports-color
 
@@ -5075,7 +5078,7 @@ snapshots:
       stacktrace-parser: 0.1.10
       tinyglobby: 0.2.10
       tsort: 0.0.1
-      undici: 5.28.3
+      undici: 5.29.0
       uuid: 8.3.2
       ws: 7.5.9
     optionalDependencies:
@@ -5380,6 +5383,8 @@ snapshots:
   lodash.startcase@4.4.0: {}
 
   lodash@4.17.21: {}
+
+  lodash@4.17.23: {}
 
   log-symbols@4.1.0:
     dependencies:
@@ -6118,11 +6123,11 @@ snapshots:
 
   undici-types@6.19.8: {}
 
-  undici@5.28.3:
+  undici@5.29.0:
     dependencies:
       '@fastify/busboy': 2.1.0
 
-  undici@6.21.3: {}
+  undici@6.23.0: {}
 
   unicorn-magic@0.1.0: {}
 
