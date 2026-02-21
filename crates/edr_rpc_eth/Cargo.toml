@@ -16,7 +16,7 @@ edr_state_api.workspace = true
 futures = { version = "0.3.28", default-features = false, features = ["std"] }
 serde = { workspace = true, features = ["derive", "std"] }
 thiserror.workspace = true
-tokio = { version = "1.21.2", default-features = false, features = ["macros"] }
+tokio = { version = "1.49.0", default-features = false, features = ["macros"] }
 tracing = { version = "0.1.44", default-features = false, features = ["attributes", "std"], optional = true }
 
 [dev-dependencies]

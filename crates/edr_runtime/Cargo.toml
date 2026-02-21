@@ -35,7 +35,7 @@ parking_lot.workspace = true
 paste = { version = "1.0.14", default-features = false }
 serial_test = "2.0.0"
 tempfile.workspace = true
-tokio = { version = "1.21.2", default-features = false, features = ["macros", "rt-multi-thread", "sync"] }
+tokio = { version = "1.49.0", default-features = false, features = ["macros", "rt-multi-thread", "sync"] }
 
 [features]
 test-remote = []

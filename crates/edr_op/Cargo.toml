@@ -46,7 +46,7 @@ revm-context-interface.workspace = true
 serde = { workspace = true, features = ["derive", "std"] }
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { version = "1.21.2", default-features = false, features = ["macros", "rt-multi-thread", "sync"] }
+tokio = { version = "1.49.0", default-features = false, features = ["macros", "rt-multi-thread", "sync"] }
 
 [dev-dependencies]
 anyhow = "1.0.100"
@@ -61,7 +61,7 @@ parking_lot.workspace = true
 paste.workspace = true
 serde_json.workspace = true
 serial_test = "2.0.0"
-tokio = { version = "1.21.2", default-features = false, features = ["macros", "rt-multi-thread", "sync"] }
+tokio = { version = "1.49.0", default-features = false, features = ["macros", "rt-multi-thread", "sync"] }
 
 [features]
 test-remote = []

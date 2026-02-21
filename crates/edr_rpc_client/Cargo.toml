@@ -21,7 +21,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha3.workspace = true
 thiserror.workspace = true
-tokio = { version = "1.21.2", default-features = false, features = ["fs", "macros", "sync"] }
+tokio = { version = "1.49.0", default-features = false, features = ["fs", "macros", "sync"] }
 tracing = { version = "0.1.44", default-features = false, features = ["attributes", "std"], optional = true }
 url = { version = "2.4.1", default-features = false }
 uuid.workspace = true
