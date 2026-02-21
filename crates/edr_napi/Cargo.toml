@@ -98,7 +98,7 @@ openssl-sys = { version = "0.9.93", features = ["vendored"] }
 openssl-sys = { version = "0.9.93", features = ["vendored"] }
 
 [build-dependencies]
-napi-build = "2.0.1"
+napi-build = "2.3.1"
 
 [features]
 op = ["dep:edr_op"]
