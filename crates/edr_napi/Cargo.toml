@@ -71,7 +71,7 @@ tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 tracing-flame = { version = "0.2.0", default-features = false, features = [
     "smallvec",
 ] }
-tracing-subscriber = { version = "0.3.18", default-features = false, features = [
+tracing-subscriber = { version = "0.3.20", default-features = false, features = [
     "ansi",
     "env-filter",
     "fmt",
