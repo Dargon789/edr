@@ -1,4 +1,4 @@
-name: Run a recent full Optimism block in the Hardhat Network
+name: Run a recent full OP block in the Hardhat Network
 
 on:
   schedule:
@@ -6,33 +6,44 @@ on:
   workflow_dispatch:
 
 jobs:
-  test-recent-optimism-block:
-    name: Test recent Optimism block
-    runs-on: ubuntu-latest
+  test-recent-op-block:
+    name: Test recent OP block (${{ matrix.network }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        network:
+          - opt-mainnet
+          - base-mainnet
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
         with:
-          ref: feat/multichain
+          persist-credentials: false
 
       - uses: ./.github/actions/setup-rust
 
       - name: Cache EDR RPC cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             **/edr-cache
-          key: test-recent-optimism-block-rpc-cache-v1
+          key: test-recent-${{ matrix.network }}-block-rpc-cache-v1
 
-      - run: cargo replay-block -u ${{ secrets.ALCHEMY_URL }} -c optimism
+      - run: |
+          BASE_ALCHEMY_URL="${{ secrets.ALCHEMY_URL }}"
+          ALCHEMY_URL="${BASE_ALCHEMY_URL//eth-mainnet/${{ matrix.network }}}"
+          echo "::add-mask::$ALCHEMY_URL"
+          cargo replay-block -u "$ALCHEMY_URL" -c op
 
       - name: Notify failures
         if: failure()
-        uses: slackapi/slack-github-action@v1.18.0
+        uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a # v2.1.1
         with:
+          webhook: ${{ secrets.GH_ACTION_NOTIFICATIONS_SLACK_WEBHOOK_URL }}
+          webhook-type: webhook-trigger
+          errors: true
           payload: |
             {
-              "workflow_name": "${{ github.workflow }}",
+              "workflow_name": "${{ github.workflow }} (${{ matrix.network }})",
               "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             }
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.GH_ACTION_NOTIFICATIONS_SLACK_WEBHOOK_URL }}

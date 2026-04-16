@@ -1,5 +1,251 @@
 # @nomicfoundation/edr
 
+## 0.12.0-next.25
+
+### Minor Changes
+
+- 3974769: Added `callTraces()` to `Response` object, inclusion of which is configurable through the `includeCallTraces` option on the `ObservabilityConfig`
+- f4bdc36: Removed `getLatestSupportedSolcVersion` API
+
+  BREAKING CHANGE: A new API `latestSupportedSolidityVersion` was previously introduced to replace the deprecated `getLatestSupportedSolcVersion`. The old API has now been removed. Users should update their code to use `latestSupportedSolidityVersion` instead.
+
+- 3974769: Removed `traces()` API from the `Response` object
+- f4bdc36: Added support to the `debug_traceCall` & `debug_traceTransaction` JSON-RPC methods for different tracers (`4byteTracer`, `callTracer`, `flatCallTracer`, `prestateTracer`, `noopTracer`, and `muxTracer`).
+
+  Our API is now aligned with Geth's tracing capabilities.
+
+  BREAKING CHANGE: Memory capture used to be enabled by default on geth, but has since been flipped <https://github.com/ethereum/go-ethereum/pull/23558> and is now disabled by default. We have followed suit and disabled it by default as well. If you were relying on memory capture, you will need to explicitly enable it by setting the `enableMemory` option to `true` in your tracer configuration.
+
+## 0.12.0-next.24
+
+### Minor Changes
+
+- 7bf3576: Added the ability to specify the hardfork when running Solidity tests. Added support for the Osaka hardfork in Solidity tests.
+- b505164: Added structured errors for unsupported Solidity test cheatcodes
+
+## 0.12.0-next.23
+
+### Minor Changes
+
+- e4920d5: Added support for the `eth_getProof` JSON-RPC method. Support is currently limited to the local blockchain.
+- 321af18: Added support for the `eth_getProof` JSON-RPC method on forked blockchains. Currently, only remote blocks are supported; requests for locally mined blocks will return an error.
+
+## 0.12.0-next.22
+
+### Minor Changes
+
+- b5a7b75: Added an API that reports the latest supported Solidity version for source instrumentation
+
+## 0.12.0-next.21
+
+### Minor Changes
+
+- 44e779c: Added function-level configuration overrides for Solidity tests
+
+### Patch Changes
+
+- b5ad15c: Added support for instrumentation of Solidity `0.8.32` and `0.8.33`
+
+## 0.12.0-next.20
+
+### Patch Changes
+
+- 34e1ab4: Updated base mainnet eip1559 parameters after SystemConfig update on 2025-12-18
+- 2272bc0: Fixed `excess_blob_gas` calculation after Osaka
+
+## 0.12.0-next.19
+
+### Patch Changes
+
+- faef065: Added support for EIP-7892 (Blob Parameter Only hardforks)
+
+## 0.12.0-next.18
+
+### Patch Changes
+
+- 25b2b2d: Added unsupported cheatcode errors for unsupported cheatcodes up to and including Foundry 1.5.0
+- 7cc0868: Added support for instrumenting Solidity 0.8.31 source code
+- 93a1484: Added Osaka hardfork activations so EDR can accurately infer the hardfork from the block timestamp
+- c52f1f6: Added basic support for Jovian hardfork (OP stack)
+
+## 0.12.0-next.17
+
+### Patch Changes
+
+- 5e3968d: Changed latest OP stack hardfork to Isthmus
+- 5e3968d: Changed latest L1 hardfork to Osaka
+- 5e3968d: Fixed default transaction gas limit for post-Osaka hardforks in OP stack and generic chains
+
+## 0.12.0-next.16
+
+### Minor Changes
+
+- dcf09de: Added full support for OP stack Isthmus hardfork
+
+### Patch Changes
+
+- 2c418b7: Added Osaka blob parameters for usage in eth_call, eth_sendTransaction, etc.
+- 8794449: Added validity check for the block RLP size cap
+- 16ba197: Added an option to `ProviderConfig` to set the transaction gas cap of the mem pool (EIP-7825)
+
+## 0.12.0-next.15
+
+### Minor Changes
+
+- 1e755a3: Backported features and fixes from Foundry 1.3
+
+### Patch Changes
+
+- 33337ea: Added latest EIP-1559 base fee params to Base Mainnet chain config
+- aff229f: Added support for Osaka hardfork
+
+## 0.12.0-next.14
+
+### Patch Changes
+
+- abf7434: Fixed unexpected test failure when running in isolate/gas stats mode
+- f67363e: Added latest dynamic base fee parameters to Base Mainnet chain config
+
+## 0.12.0-next.10
+
+### Patch Changes
+
+- 8c1f798: Fixed gas calculation for EIP-7702 refunds
+
+## 0.12.0-next.9
+
+### Minor Changes
+
+- 88a23dc: Fix prepublish step so we again publish the arch/os specific packages.
+
+## 0.12.0-next.8
+
+### Minor Changes
+
+- d0a3a41: Added the ability to collect gas reports for mining blocks and `eth_call`
+- c54a499: make all parameters of `eth_feeHistory` rpc call & provider method call required
+- d0a3a41: Added the ability to collect gas reports for Solidity tests
+
+### Patch Changes
+
+- a2d99ba: Fixed panic due to invalid GasPriceOracle bytecode for Isthmus OP hardfork
+- 23e8ad8: Added docs for `runSolidityTests` arguments.
+- 0047135: Update list of unsupported cheatcodes with cheatcodes up to Foundry 1.3.6
+- b355c15: Fixed panic when executing eth_call transaction with Isthmus OP hardfork
+
+## 0.12.0-next.7
+
+### Minor Changes
+
+- 20b4311:
+  - Added the `ContractDecoder` type
+  - Added a function `Provider.contractDecoder` to retrieve the provider's `ContractDecoder` instance
+  - Changed `EdrContext.createProvider` to receive a `ContractDecoder` instance instead of a `TracingConfigWithBuffers`
+    - The `ContractDecoder` can be constructed from a `TracingConfigWithBuffers` using the static method `ContractDecoder.withContracts`
+  - Changed `Provider.addCompilationResult` to no longer return a `boolean`. Failures are now signaled by throwing an exception.
+
+### Patch Changes
+
+- ba6bfa0: Added support for Solidity v0.8.30
+- d4806e6: Added a `collectStackTraces` option to `SolidityTestRunnerConfigArgs`, specifying what strategy to use for collecting stack traces
+
+## 0.12.0-next.6
+
+### Minor Changes
+
+- 7b5995f: New `ProviderConfig.baseFeeConfig` field available for configuring different values of eip-1559 `maxChangeDenominator` and `elasticityMultiplier` field.
+
+## 0.12.0-next.5
+
+### Patch Changes
+
+- c498e40: Upgraded revm to v27
+- ccab079: Fixed wrong stack trace for expectEmit cheatcode
+- 381643b: Removed reference to cli flag from ffi cheatcode error message.
+
+## 0.12.0-next.4
+
+### Minor Changes
+
+- 6640dda: Changed the file system permission config interface for Solidity tests, to mitigate EVM sandbox escape through cheatcodes.
+
+## 0.12.0-next.3
+
+### Minor Changes
+
+- 6ea800c: Removed deprecated JSON-RPC methods: `eth_mining`, `net_listening`, `net_peerCount`, `hardhat_addCompilationResult`, `hardhat_intervalMine`, and `hardhat_reset`.
+- a5cc346: Added cheatcode error stack trace entry. This fixes stack traces for errors from expect revert cheatcodes and improves stack traces for other cheatcode errors.
+
+## 0.12.0-next.2
+
+### Patch Changes
+
+- bf9b55b: Improved parallelism in test suite execution for better error reporting and improved performance
+- 0e0619e: Added support for function-level gas-tracking in Solidity tests.
+- 3f822d8: Fixed panic when using the `pauseGasMetering` cheatcode
+- 74b1f05: Made the `contract` field in `CallTrace` optional, and added a separate `address` field that is always present. (Breaking change)
+
+## 0.12.0-next.1
+
+### Minor Changes
+
+- ffd2deb: Added value snapshots to Solidity test runner using gas & value cheatcodes
+
+### Patch Changes
+
+- adbba3d: Fixed mining of local blocks for OP
+
+## 0.12.0-next.0
+
+### Minor Changes
+
+- 8396d70: Changed the ChainConfig to include a chain name and allow timestamp-based hardfork activations
+- 097b8c3: Changed ProviderConfig members to decouple from Hardhat 2 concepts
+- edc20dc: Added code coverage to the provider. It can be configured through the ProviderConfig
+- 5e209a1: Added support for asynchronous callbacks for collected code coverage
+- ef49c8a: Removed runSolidityTests method and introduced EdrContext::registerSolidityTestRunnerFactory and EdrContext::runSolidityTests functions as multi-chain alternative
+- 097b8c3: Removed unused type definitions from API
+- 6f0f557: Added instrumenting of source code for statement code coverage measurement
+- ae38942: Added the ability to request execution traces for Solidity tests for either all tests or just failing tests
+- 289de8a: Changed the instrumentation API to require a coverage library path
+- c21ec83: Replaced `Buffer` with `Uint8Array` in Solidity tests interface
+- 306a95e: Added an `ObservabilityConfig` to `SolidityTestRunnerConfigArgs` to allow code coverage measurement
+- eb928c6: Fixed panic on stack trace generation for receive function with modifier that calls another method. https://github.com/NomicFoundation/edr/issues/894
+- 097b8c3: Moved (and renamed) fork-specific configuration options from `ProviderConfig` to `ForkConfig`
+- 097b8c3: Replaced all occurences of Buffer with Uint8Array or ArrayBuffer
+- 585fe0b: Changed test and test suite execution time from milliseconds to nanoseconds. Correspondingly, the `durationMs` property of `TestResult` and `SuiteResult` was renamed to `durationNs`.
+
+### Patch Changes
+
+- f606fc6: Fixed instrumentation for control flow statements
+- c05b49b: Upgraded revm to v24 and alloy to more recent versions
+- f1cdbe2: Turned potential panics into JS errors to help with error reporting to Sentry.
+- a6864ff: Added support for local pre-deploys for Solidity tests.
+- 1b6d123: Fixed a bug causing async functions to throw errors at the callsite
+- ab4e20d: Added hardfork activations for Prague
+- 3f85d7d: Fixed `gasPriceOracle` predeploy for local blockchains when using Isthmus hardfork
+- 3910948: Deprecated `deleteSnapshot`, `deleteSnapshots`, `revertTo`, `revertToAndDelete`, and `snapshot` cheatcodes in favor of `deleteStateSnapshot`, `deleteStateSnapshots`, `revertToState`, `revertToStateAndDelete`, and `snapshotState`
+- 007800e: Fixed custom precompiles not being applied in `eth_sendTransaction`. This enables RIP-7212 support in transactions.
+- 2ec6415: Added hardfork activations for Base Mainnet and Base Sepolia.
+- c63ea3e: Added new `expectRevert` and `expectPartialRevert` cheatcodes.
+- 5e209a1: Fixed bug preventing reporting of collected code coverage
+- 4bad80f: Fixed the `withdrawalsRoot` field in mined post-Isthmus block headers of local blockchains
+- d903f35: Turned panics during stack trace generation due to invalid assumptions into errors.
+- 196af17: Add `allowInternalExpectRevert` config option to customize the behavior of the `expectRevert` cheatcode
+
+## 0.12.0-alpha.0
+
+### Minor Changes
+
+- c9cc954: Removed support for pre-Byzantium root field from RPC receipts
+- 2a19726: Replaced the Provider constructor with an API for registering and creating chain-specific providers in the EdrContext
+
+## 0.11.0
+
+### Minor Changes
+
+- 66c7052: Replace const enums with non-const enums in \*.d.ts files
+
 ## 0.10.0
 
 ### Minor Changes

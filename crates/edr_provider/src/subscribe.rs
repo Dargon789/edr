@@ -1,25 +1,34 @@
+use std::sync::Arc;
+
 use dyn_clone::DynClone;
-use edr_eth::{filter::LogOutput, B256, U256};
-use edr_evm::{blockchain::BlockchainError, chain_spec::L1ChainSpec, BlockAndTotalDifficulty};
+use edr_block_api::BlockAndTotalDifficulty;
+use edr_eth::filter::LogOutput;
+use edr_primitives::{B256, U256};
 
 /// Subscription event.
 #[derive(Clone, Debug)]
-pub struct SubscriptionEvent {
+pub struct SubscriptionEvent<BlockT: ?Sized, SignedTransactionT> {
     pub filter_id: U256,
-    pub result: SubscriptionEventData,
+    pub result: SubscriptionEventData<BlockT, SignedTransactionT>,
 }
 
 /// Subscription event data.
 #[derive(Clone, Debug)]
-pub enum SubscriptionEventData {
+pub enum SubscriptionEventData<BlockT: ?Sized, SignedTransactionT> {
     Logs(Vec<LogOutput>),
-    NewHeads(BlockAndTotalDifficulty<L1ChainSpec, BlockchainError>),
+    NewHeads(BlockAndTotalDifficulty<Arc<BlockT>, SignedTransactionT>),
     NewPendingTransactions(B256),
 }
 
 /// Supertrait for subscription callbacks.
-pub trait SyncSubscriberCallback: Fn(SubscriptionEvent) + DynClone + Send + Sync {}
+pub trait SyncSubscriberCallback<BlockT: ?Sized, SignedTransactionT>:
+    Fn(SubscriptionEvent<BlockT, SignedTransactionT>) + DynClone + Send + Sync
+{
+}
 
-impl<F> SyncSubscriberCallback for F where F: Fn(SubscriptionEvent) + DynClone + Send + Sync {}
+impl<BlockT: ?Sized, SignedTransactionT, F> SyncSubscriberCallback<BlockT, SignedTransactionT> for F where
+    F: Fn(SubscriptionEvent<BlockT, SignedTransactionT>) + DynClone + Send + Sync
+{
+}
 
-dyn_clone::clone_trait_object!(SyncSubscriberCallback);
+dyn_clone::clone_trait_object!(<BlockT: ?Sized, SignedTransactionT> SyncSubscriberCallback<BlockT, SignedTransactionT>);

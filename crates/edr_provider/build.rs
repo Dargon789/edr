@@ -1,16 +1,25 @@
 use cargo_toml::{Dependency, DependencyDetail, Manifest};
 
 fn main() {
-    let cargo_toml: Manifest = toml::from_str(include_str!("../edr_evm/Cargo.toml"))
-        .expect("should deserialize Cargo.toml");
-    let revm_version = match cargo_toml.dependencies.get("revm") {
+    let cargo_toml: Manifest =
+        toml::from_str(include_str!("../../Cargo.toml")).expect("should deserialize Cargo.toml");
+    let revm_version = match cargo_toml
+        .workspace
+        .expect("there is a workspace")
+        .dependencies
+        .get("revm")
+    {
         Some(Dependency::Simple(s)) => s.clone(),
-        Some(Dependency::Detailed(DependencyDetail {
-            version: Some(version),
-            git,
-            rev,
-            ..
-        })) => {
+        Some(Dependency::Detailed(detailed)) => {
+            let DependencyDetail {
+                version: Some(version),
+                git,
+                rev,
+                ..
+            } = &**detailed
+            else {
+                panic!("Unrecognized revm dependency format")
+            };
             let rev = rev.clone().map_or(String::new(), |rev| format!("@{rev}"));
             let git = git
                 .clone()

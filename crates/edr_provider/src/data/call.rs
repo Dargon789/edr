@@ -1,96 +1,102 @@
-use core::fmt::Debug;
+use edr_block_header::BlockHeader;
+use edr_blockchain_api::{r#dyn::DynBlockchainError, BlockHashByNumber};
+use edr_chain_spec::BlobExcessGasAndPrice;
+use edr_chain_spec_evm::{BlockEnvTrait, CfgEnv, ContextForChainSpec, Inspector};
+use edr_chain_spec_provider::ProviderChainSpec;
+use edr_database_components::{DatabaseComponents, WrapDatabaseRef};
+use edr_evm::{guaranteed_dry_run_with_inspector, ExecutionResultWithMetadata};
+use edr_precompile::PrecompileFn;
+use edr_primitives::{Address, HashMap, B256, U256};
+use edr_state_api::{State, StateError};
 
-use edr_eth::{
-    block::{BlobGas, Header},
-    Address, HashMap, SpecId, U256,
-};
-use edr_evm::{
-    blockchain::{BlockchainError, SyncBlockchain},
-    chain_spec::L1ChainSpec,
-    guaranteed_dry_run,
-    state::{StateError, StateOverrides, StateRefOverrider, SyncState},
-    BlobExcessGasAndPrice, BlockEnv, CfgEnvWithHandlerCfg, DebugContext, ExecutionResult,
-    Precompile, TxEnv,
-};
+use crate::{error::ProviderErrorForChainSpec, ProviderError};
 
-use crate::ProviderError;
+/// A wrapper around a block environment that forces the base fee to be zero.
+///
+/// This is required to mimick Geth's behaviour, as its call requests use a base
+/// fee of zero.
+pub(super) struct BlockEnvWithZeroBaseFee<BlockEnvT: BlockEnvTrait> {
+    inner: BlockEnvT,
+}
 
-pub(super) struct RunCallArgs<'a, 'evm, DebugDataT>
-where
-    'a: 'evm,
-{
-    pub blockchain: &'a dyn SyncBlockchain<L1ChainSpec, BlockchainError, StateError>,
-    pub header: &'a Header,
-    pub state: &'a dyn SyncState<StateError>,
-    pub state_overrides: &'a StateOverrides,
-    pub cfg_env: CfgEnvWithHandlerCfg,
-    pub tx_env: TxEnv,
-    pub precompiles: &'a HashMap<Address, Precompile>,
-    // `DebugContext` cannot be simplified further
-    #[allow(clippy::type_complexity)]
-    pub debug_context: Option<
-        DebugContext<
-            'evm,
-            L1ChainSpec,
-            BlockchainError,
-            DebugDataT,
-            StateRefOverrider<'a, &'evm dyn SyncState<StateError>>,
-        >,
-    >,
+impl<BlockEnvT: BlockEnvTrait> BlockEnvWithZeroBaseFee<BlockEnvT> {
+    /// Creates a new instance wrapping the provided block environment.
+    pub fn new(inner: BlockEnvT) -> Self {
+        Self { inner }
+    }
+}
+
+impl<BlockEnvT: BlockEnvTrait> BlockEnvTrait for BlockEnvWithZeroBaseFee<BlockEnvT> {
+    fn number(&self) -> U256 {
+        self.inner.number()
+    }
+
+    fn beneficiary(&self) -> Address {
+        self.inner.beneficiary()
+    }
+
+    fn timestamp(&self) -> U256 {
+        self.inner.timestamp()
+    }
+
+    fn gas_limit(&self) -> u64 {
+        self.inner.gas_limit()
+    }
+
+    fn basefee(&self) -> u64 {
+        // `eth_call` uses a base fee of zero to mimick geth's behavior
+        0
+    }
+
+    fn difficulty(&self) -> U256 {
+        self.inner.difficulty()
+    }
+
+    fn prevrandao(&self) -> Option<B256> {
+        self.inner.prevrandao()
+    }
+
+    fn blob_excess_gas_and_price(&self) -> Option<BlobExcessGasAndPrice> {
+        self.inner.blob_excess_gas_and_price()
+    }
 }
 
 /// Execute a transaction as a call. Returns the gas used and the output.
-pub(super) fn run_call<'a, 'evm, DebugDataT, LoggerErrorT: Debug>(
-    args: RunCallArgs<'a, 'evm, DebugDataT>,
-) -> Result<ExecutionResult, ProviderError<LoggerErrorT>>
+pub(super) fn run_call<'call, ChainSpecT, BlockchainT, InspectorT, StateT>(
+    blockchain: BlockchainT,
+    block_env: ChainSpecT::BlockEnv<'call, BlockHeader>,
+    state: StateT,
+    cfg_env: CfgEnv<ChainSpecT::Hardfork>,
+    transaction: ChainSpecT::SignedTransaction,
+    custom_precompiles: &'call HashMap<Address, PrecompileFn>,
+    inspector: &'call mut InspectorT,
+) -> Result<
+    ExecutionResultWithMetadata<ChainSpecT::HaltReason>,
+    ProviderErrorForChainSpec<ChainSpecT>,
+>
 where
-    'a: 'evm,
+    BlockchainT: BlockHashByNumber<Error = DynBlockchainError>,
+    ChainSpecT: ProviderChainSpec,
+    InspectorT: Inspector<
+        ContextForChainSpec<
+            ChainSpecT,
+            BlockEnvWithZeroBaseFee<ChainSpecT::BlockEnv<'call, BlockHeader>>,
+            WrapDatabaseRef<DatabaseComponents<BlockchainT, StateT>>,
+        >,
+    >,
+    StateT: State<Error = StateError>,
 {
-    let RunCallArgs {
-        blockchain,
-        header,
-        state,
-        state_overrides,
-        cfg_env,
-        tx_env,
-        precompiles,
-        debug_context,
-    } = args;
-
-    let block = BlockEnv {
-        number: U256::from(header.number),
-        coinbase: header.beneficiary,
-        timestamp: U256::from(header.timestamp),
-        gas_limit: U256::from(header.gas_limit),
-        basefee: U256::ZERO,
-        difficulty: header.difficulty,
-        prevrandao: if cfg_env.handler_cfg.spec_id >= SpecId::MERGE {
-            Some(header.mix_hash)
-        } else {
-            None
-        },
-        blob_excess_gas_and_price: header.blob_gas.as_ref().map(
-            |BlobGas { excess_gas, .. }| {
-                BlobExcessGasAndPrice::new(
-                    *excess_gas,
-                    cfg_env.handler_cfg.spec_id >= SpecId::PRAGUE,
-                )
-            },
-        ),
-    };
-
-    guaranteed_dry_run(
+    guaranteed_dry_run_with_inspector::<ChainSpecT, _, _, _, _>(
         blockchain,
         state,
-        state_overrides,
         cfg_env,
-        tx_env,
-        block,
-        precompiles,
-        debug_context,
+        transaction,
+        BlockEnvWithZeroBaseFee { inner: block_env },
+        custom_precompiles,
+        inspector,
     )
     .map_or_else(
         |error| Err(ProviderError::RunTransaction(error)),
-        |result| Ok(result.result),
+        |result| Ok(result.into_result_with_metadata()),
     )
 }

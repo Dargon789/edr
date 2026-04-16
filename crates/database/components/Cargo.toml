@@ -1,0 +1,17 @@
+[package]
+name = "edr_database_components"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+edr_blockchain_api.workspace = true
+edr_primitives.workspace = true
+edr_state_api.workspace = true
+revm-database-interface.workspace = true
+thiserror.workspace = true
+
+[features]
+tracing = ["edr_blockchain_api/tracing"]
+
+[lints]
+workspace = true

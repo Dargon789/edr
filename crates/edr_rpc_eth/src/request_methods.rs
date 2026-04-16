@@ -1,7 +1,7 @@
 use edr_eth::{
-    filter::LogFilterOptions, reward_percentile::RewardPercentile, Address, BlockSpec,
-    PreEip1898BlockSpec, B256, U256,
+    filter::LogFilterOptions, reward_percentile::RewardPercentile, BlockSpec, PreEip1898BlockSpec,
 };
+use edr_primitives::{Address, B256, U256};
 
 /// Methods for requests to a remote Ethereum node. Only contains methods
 /// supported by the [`edr_rpc_client::RpcClient`].
@@ -19,8 +19,7 @@ pub enum RequestMethod {
         /// newest block
         BlockSpec,
         /// reward percentiles
-        #[serde(skip_serializing_if = "Option::is_none")]
-        Option<Vec<RewardPercentile>>,
+        Vec<RewardPercentile>,
     ),
     /// `eth_chainId`
     #[serde(rename = "eth_chainId", with = "edr_eth::serde::empty_params")]
@@ -63,6 +62,14 @@ pub enum RequestMethod {
     /// `eth_getLogs`
     #[serde(rename = "eth_getLogs", with = "edr_eth::serde::sequence")]
     GetLogs(LogFilterOptions),
+    /// `eth_getProof`
+    #[serde(rename = "eth_getProof")]
+    GetProof(
+        Address,
+        /// storage-keys which should be proved and included
+        Vec<B256>,
+        BlockSpec,
+    ),
     /// `eth_getStorageAt`
     #[serde(rename = "eth_getStorageAt")]
     GetStorageAt(

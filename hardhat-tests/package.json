@@ -1,7 +1,6 @@
 {
   "name": "hardhat-edr-tests",
-  "version": "1.0.0",
-  "author": "Nomic Foundation",
+  "version": "0.1.0-next.0",
   "devDependencies": {
     "@metamask/eth-sig-util": "^4.0.0",
     "@nomicfoundation/edr": "workspace:*",
@@ -39,30 +38,29 @@
     "ethereumjs-abi": "^0.6.8",
     "ethers": "^6.1.0",
     "fs-extra": "^7.0.1",
-    "hardhat": "2.22.18",
+    "hardhat": "2.28.4",
     "mocha": "^10.0.0",
     "prettier": "^3.2.5",
     "rimraf": "^3.0.2",
     "semver": "^6.3.0",
     "sinon": "^9.0.0",
     "ts-node": "^10.8.0",
-    "typescript": "~5.0.0",
+    "typescript": "~5.8.2",
     "undici": "^5.14.0"
   },
   "homepage": "https://hardhat.org",
   "license": "MIT",
+  "private": true,
   "repository": "github:NomicFoundation/edr",
   "scripts": {
-    "build": "tsc --build --force --incremental . && pnpm run build:edr",
-    "build:edr": "cd ../crates/edr_napi && pnpm build",
+    "build": "pnpm run build:dev",
+    "build:dev": "tsc --build --incremental .",
     "clean": "rimraf build-test tsconfig.tsbuildinfo test/internal/hardhat-network/provider/.hardhat_node_test_cache test/internal/hardhat-network/stack-traces/test-files/artifacts",
     "eslint": "eslint '**/*.ts'",
     "lint": "pnpm prettier --check && pnpm eslint",
     "lint:fix": "pnpm prettier --write && pnpm eslint --fix",
-    "pretest": "pnpm build",
-    "prettier": "prettier \"**/*.{js,ts,md,json}\"",
-    "test": "mocha --recursive \"test/**/*.ts\"",
-    "test:ci": "pnpm test && pnpm test:integration",
-    "test:integration": "bash run-integration-tests.sh"
+    "pretest": "cd .. && pnpm build:dev",
+    "prettier": "prettier --check \"**/*.{js,ts,md,json}\"",
+    "test": "mocha --recursive \"test/**/*.ts\""
   }
 }

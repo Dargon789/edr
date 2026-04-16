@@ -1,0 +1,27 @@
+[package]
+name = "foundry-evm-coverage"
+description = "EVM bytecode coverage analysis"
+
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+foundry-compilers.workspace = true
+foundry-evm-core.workspace = true
+
+alloy-primitives = { workspace = true, features = [
+    "getrandom",
+    "map-foldhash",
+    "map-fxhash",
+    "map-indexmap",
+    "rand",
+    "rayon"
+] }
+eyre = "0.6"
+rayon = "1"
+revm.workspace = true
+semver.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

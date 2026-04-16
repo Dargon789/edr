@@ -1,0 +1,835 @@
+use std::fmt::{Debug, Display};
+
+use alloy_primitives::{hex, I256, U256, U512};
+use foundry_evm_core::{
+    abi::console::{format_units_int, format_units_uint},
+    backend::CheatcodeBackend,
+    evm_context::{
+        BlockEnvTr, ChainContextTr, EvmBuilderTrait, HardforkTr, TransactionEnvTr,
+        TransactionErrorTrait,
+    },
+};
+use itertools::Itertools;
+
+#[allow(clippy::wildcard_imports)]
+use crate::{impl_is_pure_true, CheatsCtxt, Result, Vm::*};
+
+const EQ_REL_DELTA_RESOLUTION: U256 = U256::from_limbs([18, 0, 0, 0]);
+
+#[derive(Debug, thiserror::Error)]
+#[error("assertion failed")]
+struct SimpleAssertionError;
+
+#[derive(thiserror::Error, Debug)]
+enum ComparisonAssertionError<'a, T> {
+    Ne { left: &'a T, right: &'a T },
+    Eq { left: &'a T, right: &'a T },
+    Ge { left: &'a T, right: &'a T },
+    Gt { left: &'a T, right: &'a T },
+    Le { left: &'a T, right: &'a T },
+    Lt { left: &'a T, right: &'a T },
+}
+
+macro_rules! format_values {
+    ($self:expr, $format_fn:expr) => {
+        match $self {
+            Self::Ne { left, right } => format!("{} == {}", $format_fn(left), $format_fn(right)),
+            Self::Eq { left, right } => format!("{} != {}", $format_fn(left), $format_fn(right)),
+            Self::Ge { left, right } => format!("{} < {}", $format_fn(left), $format_fn(right)),
+            Self::Gt { left, right } => format!("{} <= {}", $format_fn(left), $format_fn(right)),
+            Self::Le { left, right } => format!("{} > {}", $format_fn(left), $format_fn(right)),
+            Self::Lt { left, right } => format!("{} >= {}", $format_fn(left), $format_fn(right)),
+        }
+    };
+}
+
+impl<T: Display> ComparisonAssertionError<'_, T> {
+    fn format_for_values(&self) -> String {
+        format_values!(self, T::to_string)
+    }
+}
+
+impl<T: Display> ComparisonAssertionError<'_, Vec<T>> {
+    fn format_for_arrays(&self) -> String {
+        let formatter = |v: &Vec<T>| format!("[{}]", v.iter().format(", "));
+        format_values!(self, formatter)
+    }
+}
+
+impl ComparisonAssertionError<'_, U256> {
+    fn format_with_decimals(&self, decimals: &U256) -> String {
+        let formatter = |v: &U256| format_units_uint(v, decimals);
+        format_values!(self, formatter)
+    }
+}
+
+impl ComparisonAssertionError<'_, I256> {
+    fn format_with_decimals(&self, decimals: &U256) -> String {
+        let formatter = |v: &I256| format_units_int(v, decimals);
+        format_values!(self, formatter)
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+#[error("{left} !~= {right} (max delta: {max_delta}, real delta: {real_delta})")]
+struct EqAbsAssertionError<T, D> {
+    left: T,
+    right: T,
+    max_delta: D,
+    real_delta: D,
+}
+
+impl EqAbsAssertionError<U256, U256> {
+    fn format_with_decimals(&self, decimals: &U256) -> String {
+        format!(
+            "{} !~= {} (max delta: {}, real delta: {})",
+            format_units_uint(&self.left, decimals),
+            format_units_uint(&self.right, decimals),
+            format_units_uint(&self.max_delta, decimals),
+            format_units_uint(&self.real_delta, decimals),
+        )
+    }
+}
+
+impl EqAbsAssertionError<I256, U256> {
+    fn format_with_decimals(&self, decimals: &U256) -> String {
+        format!(
+            "{} !~= {} (max delta: {}, real delta: {})",
+            format_units_int(&self.left, decimals),
+            format_units_int(&self.right, decimals),
+            format_units_uint(&self.max_delta, decimals),
+            format_units_uint(&self.real_delta, decimals),
+        )
+    }
+}
+
+fn format_delta_percent(delta: &U256) -> String {
+    format!(
+        "{}%",
+        format_units_uint(delta, &(EQ_REL_DELTA_RESOLUTION - U256::from(2)))
+    )
+}
+
+#[derive(Debug)]
+enum EqRelDelta {
+    Defined(U256),
+    Undefined,
+}
+
+impl Display for EqRelDelta {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Defined(delta) => write!(f, "{}", format_delta_percent(delta)),
+            Self::Undefined => write!(f, "undefined"),
+        }
+    }
+}
+
+#[derive(thiserror::Error, Debug)]
+#[error(
+    "{left} !~= {right} (max delta: {}, real delta: {})",
+    format_delta_percent(max_delta),
+    real_delta
+)]
+struct EqRelAssertionFailure<T> {
+    left: T,
+    right: T,
+    max_delta: U256,
+    real_delta: EqRelDelta,
+}
+
+#[derive(thiserror::Error, Debug)]
+enum EqRelAssertionError<T> {
+    #[error(transparent)]
+    Failure(Box<EqRelAssertionFailure<T>>),
+    #[error("overflow in delta calculation")]
+    Overflow,
+}
+
+impl EqRelAssertionError<U256> {
+    fn format_with_decimals(&self, decimals: &U256) -> String {
+        match self {
+            Self::Failure(f) => format!(
+                "{} !~= {} (max delta: {}, real delta: {})",
+                format_units_uint(&f.left, decimals),
+                format_units_uint(&f.right, decimals),
+                format_delta_percent(&f.max_delta),
+                &f.real_delta,
+            ),
+            Self::Overflow => self.to_string(),
+        }
+    }
+}
+
+impl EqRelAssertionError<I256> {
+    fn format_with_decimals(&self, decimals: &U256) -> String {
+        match self {
+            Self::Failure(f) => format!(
+                "{} !~= {} (max delta: {}, real delta: {})",
+                format_units_int(&f.left, decimals),
+                format_units_int(&f.right, decimals),
+                format_delta_percent(&f.max_delta),
+                &f.real_delta,
+            ),
+            Self::Overflow => self.to_string(),
+        }
+    }
+}
+
+type ComparisonResult<'a, T> = Result<Vec<u8>, ComparisonAssertionError<'a, T>>;
+
+fn handle_assertion_result<ERR>(
+    result: core::result::Result<Vec<u8>, ERR>,
+    error_formatter: impl Fn(&ERR) -> String,
+    error_msg: Option<&str>,
+    format_error: bool,
+) -> Result {
+    match result {
+        Ok(_) => Ok(Vec::default()),
+        Err(err) => {
+            let error_msg = error_msg.unwrap_or("assertion failed");
+            let msg = if format_error {
+                format!("{error_msg}: {}", error_formatter(&err))
+            } else {
+                error_msg.to_string()
+            };
+            Err(msg.into())
+        }
+    }
+}
+
+/// Implements [`crate::Cheatcode`] for pairs of cheatcodes.
+///
+/// Accepts a list of pairs of cheatcodes, where the first cheatcode is the one
+/// that doesn't contain a custom error message, and the second one contains it
+/// at `error` field.
+///
+/// Passed `args` are the common arguments for both cheatcode structs (excluding
+/// `error` field).
+///
+/// Macro also accepts an optional closure that formats the error returned by
+/// the assertion.
+macro_rules! impl_assertions {
+    (|$($arg:ident),*| $body:expr, $format_error:literal, $(($no_error:ident, $with_error:ident)),* $(,)?) => {
+        impl_assertions!(@args_tt |($($arg),*)| $body, |e| e.to_string(), $format_error, $(($no_error, $with_error),)*);
+    };
+    (|$($arg:ident),*| $body:expr, $(($no_error:ident, $with_error:ident)),* $(,)?) => {
+        impl_assertions!(@args_tt |($($arg),*)| $body, |e| e.to_string(), true, $(($no_error, $with_error),)*);
+    };
+    (|$($arg:ident),*| $body:expr, $error_formatter:expr, $(($no_error:ident, $with_error:ident)),* $(,)?) => {
+        impl_assertions!(@args_tt |($($arg),*)| $body, $error_formatter, true, $(($no_error, $with_error)),*);
+    };
+    // We convert args to `tt` and later expand them back into tuple to allow usage of expanded args inside of
+    // each assertion type context.
+    (@args_tt |$args:tt| $body:expr, $error_formatter:expr, $format_error:literal, $(($no_error:ident, $with_error:ident)),* $(,)?) => {
+        $(
+            impl_assertions!(@impl $no_error, $with_error, $args, $body, $error_formatter, $format_error);
+        )*
+    };
+    (@impl $no_error:ident, $with_error:ident, ($($arg:ident),*), $body:expr, $error_formatter:expr, $format_error:literal) => {
+        impl crate::Cheatcode for $no_error {
+            fn apply_stateful<
+                BlockT: BlockEnvTr,
+                TxT: TransactionEnvTr,
+                EvmBuilderT: EvmBuilderTrait<BlockT, ChainContextT, HaltReasonT, HardforkT, TransactionErrorT, TxT>,
+                HaltReasonT: revm::context::result::HaltReasonTr,
+                HardforkT: HardforkTr,
+                TransactionErrorT: TransactionErrorTrait,
+                ChainContextT: ChainContextTr,
+                DatabaseT: CheatcodeBackend<
+                    BlockT,
+                    TxT,
+                    EvmBuilderT,
+                    HaltReasonT,
+                    HardforkT,
+                    TransactionErrorT,
+                    ChainContextT,
+                >,
+            >(
+                &self,
+                _ccx: &mut CheatsCtxt<
+                    BlockT,
+                    TxT,
+                    EvmBuilderT,
+                    HaltReasonT,
+                    HardforkT,
+                    TransactionErrorT,
+                    ChainContextT,
+                    DatabaseT,
+                >,
+            ) -> Result {
+                let Self { $($arg),* } = self;
+                handle_assertion_result($body, $error_formatter, None, $format_error)
+            }
+        }
+
+        impl crate::Cheatcode for $with_error {
+            fn apply_stateful<
+                BlockT: BlockEnvTr,
+                TxT: TransactionEnvTr,
+                EvmBuilderT: EvmBuilderTrait<BlockT, ChainContextT, HaltReasonT, HardforkT, TransactionErrorT, TxT>,
+                HaltReasonT: revm::context::result::HaltReasonTr,
+                HardforkT: HardforkTr,
+                TransactionErrorT: TransactionErrorTrait,
+                ChainContextT: ChainContextTr,
+                DatabaseT: CheatcodeBackend<
+                    BlockT,
+                    TxT,
+                    EvmBuilderT,
+                    HaltReasonT,
+                    HardforkT,
+                    TransactionErrorT,
+                    ChainContextT,
+                >,
+            >(
+                &self,
+                _ccx: &mut CheatsCtxt<
+                    BlockT,
+                    TxT,
+                    EvmBuilderT,
+                    HaltReasonT,
+                    HardforkT,
+                    TransactionErrorT,
+                    ChainContextT,
+                    DatabaseT,
+                >,
+            ) -> Result {
+                let Self { $($arg),*, error} = self;
+                handle_assertion_result($body, $error_formatter, Some(error), $format_error)
+            }
+        }
+    };
+}
+
+impl_assertions! {
+    |condition| assert_true(*condition),
+    false,
+    (assertTrue_0Call, assertTrue_1Call),
+}
+
+impl_assertions! {
+    |condition| assert_false(*condition),
+    false,
+    (assertFalse_0Call, assertFalse_1Call),
+}
+
+impl_assertions! {
+    |left, right| assert_eq(left, right),
+    ComparisonAssertionError::format_for_values,
+    (assertEq_0Call, assertEq_1Call),
+    (assertEq_2Call, assertEq_3Call),
+    (assertEq_4Call, assertEq_5Call),
+    (assertEq_6Call, assertEq_7Call),
+    (assertEq_8Call, assertEq_9Call),
+    (assertEq_10Call, assertEq_11Call),
+}
+
+impl_assertions! {
+    |left, right| assert_eq(&hex::encode_prefixed(left), &hex::encode_prefixed(right)),
+    ComparisonAssertionError::format_for_values,
+    (assertEq_12Call, assertEq_13Call),
+}
+
+impl_assertions! {
+    |left, right| assert_eq(left, right),
+    ComparisonAssertionError::format_for_arrays,
+    (assertEq_14Call, assertEq_15Call),
+    (assertEq_16Call, assertEq_17Call),
+    (assertEq_18Call, assertEq_19Call),
+    (assertEq_20Call, assertEq_21Call),
+    (assertEq_22Call, assertEq_23Call),
+    (assertEq_24Call, assertEq_25Call),
+}
+
+impl_assertions! {
+    |left, right| assert_eq(
+        &left.iter().map(hex::encode_prefixed).collect::<Vec<_>>(),
+        &right.iter().map(hex::encode_prefixed).collect::<Vec<_>>(),
+    ),
+    ComparisonAssertionError::format_for_arrays,
+    (assertEq_26Call, assertEq_27Call),
+}
+
+impl_assertions! {
+    |left, right, decimals| assert_eq(left, right),
+    |e| e.format_with_decimals(decimals),
+    (assertEqDecimal_0Call, assertEqDecimal_1Call),
+    (assertEqDecimal_2Call, assertEqDecimal_3Call),
+}
+
+impl_assertions! {
+    |left, right| assert_not_eq(left, right),
+    ComparisonAssertionError::format_for_values,
+    (assertNotEq_0Call, assertNotEq_1Call),
+    (assertNotEq_2Call, assertNotEq_3Call),
+    (assertNotEq_4Call, assertNotEq_5Call),
+    (assertNotEq_6Call, assertNotEq_7Call),
+    (assertNotEq_8Call, assertNotEq_9Call),
+    (assertNotEq_10Call, assertNotEq_11Call),
+}
+
+impl_assertions! {
+    |left, right| assert_not_eq(&hex::encode_prefixed(left), &hex::encode_prefixed(right)),
+    ComparisonAssertionError::format_for_values,
+    (assertNotEq_12Call, assertNotEq_13Call),
+}
+
+impl_assertions! {
+    |left, right| assert_not_eq(left, right),
+    ComparisonAssertionError::format_for_arrays,
+    (assertNotEq_14Call, assertNotEq_15Call),
+    (assertNotEq_16Call, assertNotEq_17Call),
+    (assertNotEq_18Call, assertNotEq_19Call),
+    (assertNotEq_20Call, assertNotEq_21Call),
+    (assertNotEq_22Call, assertNotEq_23Call),
+    (assertNotEq_24Call, assertNotEq_25Call),
+}
+
+impl_assertions! {
+    |left, right| assert_not_eq(
+        &left.iter().map(hex::encode_prefixed).collect::<Vec<_>>(),
+        &right.iter().map(hex::encode_prefixed).collect::<Vec<_>>(),
+    ),
+    ComparisonAssertionError::format_for_arrays,
+    (assertNotEq_26Call, assertNotEq_27Call),
+}
+
+impl_assertions! {
+    |left, right, decimals| assert_not_eq(left, right),
+    |e| e.format_with_decimals(decimals),
+    (assertNotEqDecimal_0Call, assertNotEqDecimal_1Call),
+    (assertNotEqDecimal_2Call, assertNotEqDecimal_3Call),
+}
+
+impl_assertions! {
+    |left, right| assert_gt(left, right),
+    ComparisonAssertionError::format_for_values,
+    (assertGt_0Call, assertGt_1Call),
+    (assertGt_2Call, assertGt_3Call),
+}
+
+impl_assertions! {
+    |left, right, decimals| assert_gt(left, right),
+    |e| e.format_with_decimals(decimals),
+    (assertGtDecimal_0Call, assertGtDecimal_1Call),
+    (assertGtDecimal_2Call, assertGtDecimal_3Call),
+}
+
+impl_assertions! {
+    |left, right| assert_ge(left, right),
+    ComparisonAssertionError::format_for_values,
+    (assertGe_0Call, assertGe_1Call),
+    (assertGe_2Call, assertGe_3Call),
+}
+
+impl_assertions! {
+    |left, right, decimals| assert_ge(left, right),
+    |e| e.format_with_decimals(decimals),
+    (assertGeDecimal_0Call, assertGeDecimal_1Call),
+    (assertGeDecimal_2Call, assertGeDecimal_3Call),
+}
+
+impl_assertions! {
+    |left, right| assert_lt(left, right),
+    ComparisonAssertionError::format_for_values,
+    (assertLt_0Call, assertLt_1Call),
+    (assertLt_2Call, assertLt_3Call),
+}
+
+impl_assertions! {
+    |left, right, decimals| assert_lt(left, right),
+    |e| e.format_with_decimals(decimals),
+    (assertLtDecimal_0Call, assertLtDecimal_1Call),
+    (assertLtDecimal_2Call, assertLtDecimal_3Call),
+}
+
+impl_assertions! {
+    |left, right| assert_le(left, right),
+    ComparisonAssertionError::format_for_values,
+    (assertLe_0Call, assertLe_1Call),
+    (assertLe_2Call, assertLe_3Call),
+}
+
+impl_assertions! {
+    |left, right, decimals| assert_le(left, right),
+    |e| e.format_with_decimals(decimals),
+    (assertLeDecimal_0Call, assertLeDecimal_1Call),
+    (assertLeDecimal_2Call, assertLeDecimal_3Call),
+}
+
+impl_assertions! {
+    |left, right, maxDelta| uint_assert_approx_eq_abs(*left, *right, *maxDelta),
+    (assertApproxEqAbs_0Call, assertApproxEqAbs_1Call),
+}
+
+impl_assertions! {
+    |left, right, maxDelta| int_assert_approx_eq_abs(*left, *right, *maxDelta),
+    (assertApproxEqAbs_2Call, assertApproxEqAbs_3Call),
+}
+
+impl_assertions! {
+    |left, right, decimals, maxDelta| uint_assert_approx_eq_abs(*left, *right, *maxDelta),
+    |e| e.format_with_decimals(decimals),
+    (assertApproxEqAbsDecimal_0Call, assertApproxEqAbsDecimal_1Call),
+}
+
+impl_assertions! {
+    |left, right, decimals, maxDelta| int_assert_approx_eq_abs(*left, *right, *maxDelta),
+    |e| e.format_with_decimals(decimals),
+    (assertApproxEqAbsDecimal_2Call, assertApproxEqAbsDecimal_3Call),
+}
+
+impl_assertions! {
+    |left, right, maxPercentDelta| uint_assert_approx_eq_rel(*left, *right, *maxPercentDelta),
+    (assertApproxEqRel_0Call, assertApproxEqRel_1Call),
+}
+
+impl_assertions! {
+    |left, right, maxPercentDelta| int_assert_approx_eq_rel(*left, *right, *maxPercentDelta),
+    (assertApproxEqRel_2Call, assertApproxEqRel_3Call),
+}
+
+impl_assertions! {
+    |left, right, decimals, maxPercentDelta| uint_assert_approx_eq_rel(*left, *right, *maxPercentDelta),
+    |e| e.format_with_decimals(decimals),
+    (assertApproxEqRelDecimal_0Call, assertApproxEqRelDecimal_1Call),
+}
+
+impl_assertions! {
+    |left, right, decimals, maxPercentDelta| int_assert_approx_eq_rel(*left, *right, *maxPercentDelta),
+    |e| e.format_with_decimals(decimals),
+    (assertApproxEqRelDecimal_2Call, assertApproxEqRelDecimal_3Call),
+}
+
+fn assert_true(condition: bool) -> Result<Vec<u8>, SimpleAssertionError> {
+    if condition {
+        Ok(Vec::default())
+    } else {
+        Err(SimpleAssertionError)
+    }
+}
+
+fn assert_false(condition: bool) -> Result<Vec<u8>, SimpleAssertionError> {
+    if !condition {
+        Ok(Vec::default())
+    } else {
+        Err(SimpleAssertionError)
+    }
+}
+
+fn assert_eq<'a, T: PartialEq>(left: &'a T, right: &'a T) -> ComparisonResult<'a, T> {
+    if left == right {
+        Ok(Vec::default())
+    } else {
+        Err(ComparisonAssertionError::Eq { left, right })
+    }
+}
+
+fn assert_not_eq<'a, T: PartialEq>(left: &'a T, right: &'a T) -> ComparisonResult<'a, T> {
+    if left != right {
+        Ok(Vec::default())
+    } else {
+        Err(ComparisonAssertionError::Ne { left, right })
+    }
+}
+
+fn get_delta_int(left: I256, right: I256) -> U256 {
+    let (left_sign, left_abs) = left.into_sign_and_abs();
+    let (right_sign, right_abs) = right.into_sign_and_abs();
+
+    if left_sign == right_sign {
+        if left_abs > right_abs {
+            left_abs - right_abs
+        } else {
+            right_abs - left_abs
+        }
+    } else {
+        left_abs + right_abs
+    }
+}
+
+/// Calculates the relative delta for an absolute difference.
+///
+/// Avoids overflow in the multiplication by using [`U512`] to hold the
+/// intermediary result.
+fn calc_delta_full<T>(abs_diff: U256, right: U256) -> Result<U256, EqRelAssertionError<T>> {
+    let delta = U512::from(abs_diff) * U512::from(10).pow(U512::from(EQ_REL_DELTA_RESOLUTION))
+        / U512::from(right);
+    U256::checked_from_limbs_slice(delta.as_limbs()).ok_or(EqRelAssertionError::Overflow)
+}
+
+fn uint_assert_approx_eq_abs(
+    left: U256,
+    right: U256,
+    max_delta: U256,
+) -> Result<Vec<u8>, Box<EqAbsAssertionError<U256, U256>>> {
+    let delta = left.abs_diff(right);
+
+    if delta <= max_delta {
+        Ok(Vec::default())
+    } else {
+        Err(Box::new(EqAbsAssertionError {
+            left,
+            right,
+            max_delta,
+            real_delta: delta,
+        }))
+    }
+}
+
+fn int_assert_approx_eq_abs(
+    left: I256,
+    right: I256,
+    max_delta: U256,
+) -> Result<Vec<u8>, Box<EqAbsAssertionError<I256, U256>>> {
+    let delta = get_delta_int(left, right);
+
+    if delta <= max_delta {
+        Ok(Vec::default())
+    } else {
+        Err(Box::new(EqAbsAssertionError {
+            left,
+            right,
+            max_delta,
+            real_delta: delta,
+        }))
+    }
+}
+
+fn uint_assert_approx_eq_rel(
+    left: U256,
+    right: U256,
+    max_delta: U256,
+) -> Result<Vec<u8>, EqRelAssertionError<U256>> {
+    if right.is_zero() {
+        if left.is_zero() {
+            return Ok(Vec::default());
+        } else {
+            return Err(EqRelAssertionError::Failure(Box::new(
+                EqRelAssertionFailure {
+                    left,
+                    right,
+                    max_delta,
+                    real_delta: EqRelDelta::Undefined,
+                },
+            )));
+        };
+    }
+
+    let delta = calc_delta_full::<U256>(left.abs_diff(right), right)?;
+
+    if delta <= max_delta {
+        Ok(Vec::default())
+    } else {
+        Err(EqRelAssertionError::Failure(Box::new(
+            EqRelAssertionFailure {
+                left,
+                right,
+                max_delta,
+                real_delta: EqRelDelta::Defined(delta),
+            },
+        )))
+    }
+}
+
+fn int_assert_approx_eq_rel(
+    left: I256,
+    right: I256,
+    max_delta: U256,
+) -> Result<Vec<u8>, EqRelAssertionError<I256>> {
+    if right.is_zero() {
+        if left.is_zero() {
+            return Ok(Vec::default());
+        } else {
+            return Err(EqRelAssertionError::Failure(Box::new(
+                EqRelAssertionFailure {
+                    left,
+                    right,
+                    max_delta,
+                    real_delta: EqRelDelta::Undefined,
+                },
+            )));
+        }
+    }
+
+    let delta = calc_delta_full::<I256>(get_delta_int(left, right), right.unsigned_abs())?;
+
+    if delta <= max_delta {
+        Ok(Vec::default())
+    } else {
+        Err(EqRelAssertionError::Failure(Box::new(
+            EqRelAssertionFailure {
+                left,
+                right,
+                max_delta,
+                real_delta: EqRelDelta::Defined(delta),
+            },
+        )))
+    }
+}
+
+fn assert_gt<'a, T: PartialOrd>(left: &'a T, right: &'a T) -> ComparisonResult<'a, T> {
+    if left > right {
+        Ok(Vec::default())
+    } else {
+        Err(ComparisonAssertionError::Gt { left, right })
+    }
+}
+
+fn assert_ge<'a, T: PartialOrd>(left: &'a T, right: &'a T) -> ComparisonResult<'a, T> {
+    if left >= right {
+        Ok(Vec::default())
+    } else {
+        Err(ComparisonAssertionError::Ge { left, right })
+    }
+}
+
+fn assert_lt<'a, T: PartialOrd>(left: &'a T, right: &'a T) -> ComparisonResult<'a, T> {
+    if left < right {
+        Ok(Vec::default())
+    } else {
+        Err(ComparisonAssertionError::Lt { left, right })
+    }
+}
+
+fn assert_le<'a, T: PartialOrd>(left: &'a T, right: &'a T) -> ComparisonResult<'a, T> {
+    if left <= right {
+        Ok(Vec::default())
+    } else {
+        Err(ComparisonAssertionError::Le { left, right })
+    }
+}
+
+// Implement IsPure for all assertion types
+impl_is_pure_true!(assertTrue_0Call);
+impl_is_pure_true!(assertTrue_1Call);
+impl_is_pure_true!(assertFalse_0Call);
+impl_is_pure_true!(assertFalse_1Call);
+
+impl_is_pure_true!(assertEq_0Call);
+impl_is_pure_true!(assertEq_1Call);
+impl_is_pure_true!(assertEq_2Call);
+impl_is_pure_true!(assertEq_3Call);
+impl_is_pure_true!(assertEq_4Call);
+impl_is_pure_true!(assertEq_5Call);
+impl_is_pure_true!(assertEq_6Call);
+impl_is_pure_true!(assertEq_7Call);
+impl_is_pure_true!(assertEq_8Call);
+impl_is_pure_true!(assertEq_9Call);
+impl_is_pure_true!(assertEq_10Call);
+impl_is_pure_true!(assertEq_11Call);
+impl_is_pure_true!(assertEq_12Call);
+impl_is_pure_true!(assertEq_13Call);
+impl_is_pure_true!(assertEq_14Call);
+impl_is_pure_true!(assertEq_15Call);
+impl_is_pure_true!(assertEq_16Call);
+impl_is_pure_true!(assertEq_17Call);
+impl_is_pure_true!(assertEq_18Call);
+impl_is_pure_true!(assertEq_19Call);
+impl_is_pure_true!(assertEq_20Call);
+impl_is_pure_true!(assertEq_21Call);
+impl_is_pure_true!(assertEq_22Call);
+impl_is_pure_true!(assertEq_23Call);
+impl_is_pure_true!(assertEq_24Call);
+impl_is_pure_true!(assertEq_25Call);
+impl_is_pure_true!(assertEq_26Call);
+impl_is_pure_true!(assertEq_27Call);
+
+impl_is_pure_true!(assertEqDecimal_0Call);
+impl_is_pure_true!(assertEqDecimal_1Call);
+impl_is_pure_true!(assertEqDecimal_2Call);
+impl_is_pure_true!(assertEqDecimal_3Call);
+
+impl_is_pure_true!(assertNotEq_0Call);
+impl_is_pure_true!(assertNotEq_1Call);
+impl_is_pure_true!(assertNotEq_2Call);
+impl_is_pure_true!(assertNotEq_3Call);
+impl_is_pure_true!(assertNotEq_4Call);
+impl_is_pure_true!(assertNotEq_5Call);
+impl_is_pure_true!(assertNotEq_6Call);
+impl_is_pure_true!(assertNotEq_7Call);
+impl_is_pure_true!(assertNotEq_8Call);
+impl_is_pure_true!(assertNotEq_9Call);
+impl_is_pure_true!(assertNotEq_10Call);
+impl_is_pure_true!(assertNotEq_11Call);
+impl_is_pure_true!(assertNotEq_12Call);
+impl_is_pure_true!(assertNotEq_13Call);
+impl_is_pure_true!(assertNotEq_14Call);
+impl_is_pure_true!(assertNotEq_15Call);
+impl_is_pure_true!(assertNotEq_16Call);
+impl_is_pure_true!(assertNotEq_17Call);
+impl_is_pure_true!(assertNotEq_18Call);
+impl_is_pure_true!(assertNotEq_19Call);
+impl_is_pure_true!(assertNotEq_20Call);
+impl_is_pure_true!(assertNotEq_21Call);
+impl_is_pure_true!(assertNotEq_22Call);
+impl_is_pure_true!(assertNotEq_23Call);
+impl_is_pure_true!(assertNotEq_24Call);
+impl_is_pure_true!(assertNotEq_25Call);
+impl_is_pure_true!(assertNotEq_26Call);
+impl_is_pure_true!(assertNotEq_27Call);
+
+impl_is_pure_true!(assertNotEqDecimal_0Call);
+impl_is_pure_true!(assertNotEqDecimal_1Call);
+impl_is_pure_true!(assertNotEqDecimal_2Call);
+impl_is_pure_true!(assertNotEqDecimal_3Call);
+
+impl_is_pure_true!(assertGt_0Call);
+impl_is_pure_true!(assertGt_1Call);
+impl_is_pure_true!(assertGt_2Call);
+impl_is_pure_true!(assertGt_3Call);
+
+impl_is_pure_true!(assertGtDecimal_0Call);
+impl_is_pure_true!(assertGtDecimal_1Call);
+impl_is_pure_true!(assertGtDecimal_2Call);
+impl_is_pure_true!(assertGtDecimal_3Call);
+
+impl_is_pure_true!(assertGe_0Call);
+impl_is_pure_true!(assertGe_1Call);
+impl_is_pure_true!(assertGe_2Call);
+impl_is_pure_true!(assertGe_3Call);
+
+impl_is_pure_true!(assertGeDecimal_0Call);
+impl_is_pure_true!(assertGeDecimal_1Call);
+impl_is_pure_true!(assertGeDecimal_2Call);
+impl_is_pure_true!(assertGeDecimal_3Call);
+
+impl_is_pure_true!(assertLt_0Call);
+impl_is_pure_true!(assertLt_1Call);
+impl_is_pure_true!(assertLt_2Call);
+impl_is_pure_true!(assertLt_3Call);
+
+impl_is_pure_true!(assertLtDecimal_0Call);
+impl_is_pure_true!(assertLtDecimal_1Call);
+impl_is_pure_true!(assertLtDecimal_2Call);
+impl_is_pure_true!(assertLtDecimal_3Call);
+
+impl_is_pure_true!(assertLe_0Call);
+impl_is_pure_true!(assertLe_1Call);
+impl_is_pure_true!(assertLe_2Call);
+impl_is_pure_true!(assertLe_3Call);
+
+impl_is_pure_true!(assertLeDecimal_0Call);
+impl_is_pure_true!(assertLeDecimal_1Call);
+impl_is_pure_true!(assertLeDecimal_2Call);
+impl_is_pure_true!(assertLeDecimal_3Call);
+
+impl_is_pure_true!(assertApproxEqAbs_0Call);
+impl_is_pure_true!(assertApproxEqAbs_1Call);
+impl_is_pure_true!(assertApproxEqAbs_2Call);
+impl_is_pure_true!(assertApproxEqAbs_3Call);
+
+impl_is_pure_true!(assertApproxEqAbsDecimal_0Call);
+impl_is_pure_true!(assertApproxEqAbsDecimal_1Call);
+impl_is_pure_true!(assertApproxEqAbsDecimal_2Call);
+impl_is_pure_true!(assertApproxEqAbsDecimal_3Call);
+
+impl_is_pure_true!(assertApproxEqRel_0Call);
+impl_is_pure_true!(assertApproxEqRel_1Call);
+impl_is_pure_true!(assertApproxEqRel_2Call);
+impl_is_pure_true!(assertApproxEqRel_3Call);
+
+impl_is_pure_true!(assertApproxEqRelDecimal_0Call);
+impl_is_pure_true!(assertApproxEqRelDecimal_1Call);
+impl_is_pure_true!(assertApproxEqRelDecimal_2Call);
+impl_is_pure_true!(assertApproxEqRelDecimal_3Call);

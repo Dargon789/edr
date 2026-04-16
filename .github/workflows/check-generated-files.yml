@@ -1,0 +1,45 @@
+name: Check generated files
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{github.workflow}}-${{github.ref}}
+  cancel-in-progress: true
+
+jobs:
+  edr-op-chain-configs:
+    name: Check that op-chain config files are up to date
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout EDR repo
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust & install nightly rustfmt
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: nightly
+          components: rustfmt
+
+      - name: Run op-chain-config command that updates chains config
+        run: cargo op-chain-config
+
+      - name: Check that there are no uncommitted changes
+        run: cargo op-chain-config -- --check
+
+      - name: Notify failure
+        if: failure()
+        uses: slackapi/slack-github-action@91efab103c0de0a537f72a35f6b8cda0ee76bf0a # v2.1.1
+        with:
+          webhook: ${{ secrets.GH_ACTION_NOTIFICATIONS_SLACK_WEBHOOK_URL }}
+          webhook-type: webhook-trigger
+          payload: |
+            {
+              "workflow_name": "${{ github.workflow }}",
+              "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            }

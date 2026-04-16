@@ -1,0 +1,12 @@
+[package]
+name = "edr_chain_spec_rpc"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+edr_primitives.workspace = true
+edr_receipt.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

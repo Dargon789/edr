@@ -1,12 +1,16 @@
 {
   "name": "EDR",
-  "image": "mcr.microsoft.com/devcontainers/base:bullseye",
+  "image": "mcr.microsoft.com/devcontainers/base:trixie",
+  "capAdd": [
+    // Enable for profiling with `perf`
+    // "SYS_ADMIN"
+  ],
   "features": {
     "ghcr.io/devcontainers/features/node:1": {
-      "version": "18"
+      "version": "22"
     }
   },
-  "postAttachCommand": "scripts/setup.sh",
+  "postCreateCommand": "scripts/setup.sh",
   "portsAttributes": {
     // The default port of mdbook
     "3000": {

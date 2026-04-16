@@ -1,0 +1,53 @@
+use std::sync::LazyLock;
+
+use edr_chain_config::ChainConfig;
+use edr_eip1559::BaseFeeParams;
+use edr_primitives::HashMap;
+pub use op_revm::name;
+
+use crate::Hardfork;
+
+/// Base chain configs
+pub mod base;
+pub mod generated;
+/// OP chain configs
+pub mod op;
+
+/// Returns the chain configurations for OP chains.
+pub fn op_chain_configs() -> &'static HashMap<u64, ChainConfig<Hardfork>> {
+    static CONFIGS: LazyLock<HashMap<u64, ChainConfig<Hardfork>>> = LazyLock::new(|| {
+        let mut configs = generated::chain_configs();
+
+        // Override `base_fee_params` for `op` blockchains
+        // TODO: remove this override once https://github.com/NomicFoundation/edr/issues/1072 is implemented
+        configs
+            .entry(op::MAINNET_CHAIN_ID)
+            .and_modify(|entry| entry.base_fee_params = op::MAINNET_BASE_FEE_PARAMS.clone());
+        configs
+            .entry(op::SEPOLIA_CHAIN_ID)
+            .and_modify(|entry| entry.base_fee_params = op::SEPOLIA_BASE_FEE_PARAMS.clone());
+
+        // Override `base_fee_params` for `base` blockchains
+        // TODO: remove this override once https://github.com/NomicFoundation/edr/issues/1072 is implemented
+        configs
+            .entry(base::MAINNET_CHAIN_ID)
+            .and_modify(|entry| entry.base_fee_params = base::MAINNET_BASE_FEE_PARAMS.clone());
+        configs
+            .entry(base::SEPOLIA_CHAIN_ID)
+            .and_modify(|entry| entry.base_fee_params = base::SEPOLIA_BASE_FEE_PARAMS.clone());
+        configs
+    });
+
+    &CONFIGS
+}
+
+/// Returns the corresponding configuration for the provided chain ID, if
+/// it is supported.
+pub fn op_chain_config(chain_id: u64) -> Option<&'static ChainConfig<Hardfork>> {
+    op_chain_configs().get(&chain_id)
+}
+
+/// Returns the default base fee params to fallback to
+pub fn op_default_base_fee_params() -> &'static BaseFeeParams<Hardfork> {
+    &op::MAINNET_BASE_FEE_PARAMS
+}

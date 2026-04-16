@@ -1,109 +1,121 @@
-use core::fmt::Debug;
-use std::cmp;
+use core::cmp;
 
-use edr_eth::{
-    block::Header, reward_percentile::RewardPercentile, transaction::Transaction, Address, HashMap,
-    U256,
-};
-use edr_evm::{
-    blockchain::{BlockchainError, SyncBlockchain},
-    chain_spec::L1ChainSpec,
-    state::{StateError, StateOverrides, SyncState},
-    trace::{register_trace_collector_handles, TraceCollector},
-    CfgEnvWithHandlerCfg, DebugContext, ExecutionResult, Precompile, SyncBlock, TxEnv,
-};
+use edr_block_api::{Block as _, FetchBlockReceipts};
+use edr_block_header::BlockHeader;
+use edr_blockchain_api::{r#dyn::DynBlockchainError, BlockHashByNumber};
+use edr_chain_spec::{BlockEnvConstructor as _, ExecutableTransaction as _};
+use edr_chain_spec_evm::{result::ExecutionResult, CfgEnv};
+use edr_chain_spec_provider::ProviderChainSpec;
+use edr_eip7892::ScheduledBlobParams;
+use edr_eth::reward_percentile::RewardPercentile;
+use edr_precompile::PrecompileFn;
+use edr_primitives::{Address, HashMap, HashSet, U256};
+use edr_receipt::ReceiptTrait as _;
+use edr_state_api::DynState;
+use edr_transaction::TransactionMut;
 use itertools::Itertools;
 
 use crate::{
-    data::call::{self, RunCallArgs},
+    data::{call, EstimateGasResult},
+    error::ProviderErrorForChainSpec,
+    observability::{EvmObservedData, EvmObserver, EvmObserverConfig},
     ProviderError,
 };
 
-pub(super) struct CheckGasLimitArgs<'a> {
-    pub blockchain: &'a dyn SyncBlockchain<L1ChainSpec, BlockchainError, StateError>,
-    pub header: &'a Header,
-    pub state: &'a dyn SyncState<StateError>,
-    pub state_overrides: &'a StateOverrides,
-    pub cfg_env: CfgEnvWithHandlerCfg,
-    pub tx_env: TxEnv,
+pub(super) struct CheckGasLimitArgs<'a, HardforkT, SignedTransactionT> {
+    pub blockchain: &'a dyn BlockHashByNumber<Error = DynBlockchainError>,
+    pub header: &'a BlockHeader,
+    pub state: &'a dyn DynState,
+    pub cfg_env: CfgEnv<HardforkT>,
+    pub transaction: SignedTransactionT,
     pub gas_limit: u64,
-    pub precompiles: &'a HashMap<Address, Precompile>,
-    pub trace_collector: &'a mut TraceCollector,
+    pub custom_precompiles: &'a HashMap<Address, PrecompileFn>,
+    pub observer: &'a mut EvmObserver,
+    pub scheduled_blob_params: Option<&'a ScheduledBlobParams>,
+}
+
+pub(super) struct CheckGasLimitResult {
+    pub success: bool,
+    pub precompile_addresses: HashSet<Address>,
 }
 
 /// Test if the transaction successfully executes with the given gas limit.
 /// Returns true on success and return false if the transaction runs out of gas
 /// or funds or reverts. Returns an error for any other halt reason.
-pub(super) fn check_gas_limit<LoggerErrorT: Debug>(
-    args: CheckGasLimitArgs<'_>,
-) -> Result<bool, ProviderError<LoggerErrorT>> {
+pub(super) fn check_gas_limit<ChainSpecT: ProviderChainSpec<SignedTransaction: TransactionMut>>(
+    args: CheckGasLimitArgs<'_, ChainSpecT::Hardfork, ChainSpecT::SignedTransaction>,
+) -> Result<CheckGasLimitResult, ProviderErrorForChainSpec<ChainSpecT>> {
     let CheckGasLimitArgs {
         blockchain,
         header,
         state,
-        state_overrides,
         cfg_env,
-        mut tx_env,
+        mut transaction,
         gas_limit,
-        precompiles,
-        trace_collector,
+        custom_precompiles,
+        observer,
+        scheduled_blob_params,
     } = args;
 
-    tx_env.gas_limit = gas_limit;
+    transaction.set_gas_limit(gas_limit);
+    let block_env =
+        ChainSpecT::BlockEnv::new_block_env(header, cfg_env.spec, scheduled_blob_params);
 
-    let result = call::run_call(RunCallArgs {
+    let result = call::run_call::<ChainSpecT, _, _, _>(
         blockchain,
-        header,
+        block_env,
         state,
-        state_overrides,
         cfg_env,
-        tx_env,
-        precompiles,
-        debug_context: Some(DebugContext {
-            data: trace_collector,
-            register_handles_fn: register_trace_collector_handles,
-        }),
-    })?;
+        transaction,
+        custom_precompiles,
+        observer,
+    )?;
 
-    Ok(matches!(result, ExecutionResult::Success { .. }))
+    Ok(CheckGasLimitResult {
+        success: matches!(result.result, ExecutionResult::Success { .. }),
+        precompile_addresses: result.precompile_addresses,
+    })
 }
 
-pub(super) struct BinarySearchEstimationArgs<'a> {
-    pub blockchain: &'a dyn SyncBlockchain<L1ChainSpec, BlockchainError, StateError>,
-    pub header: &'a Header,
-    pub state: &'a dyn SyncState<StateError>,
-    pub state_overrides: &'a StateOverrides,
-    pub cfg_env: CfgEnvWithHandlerCfg,
-    pub tx_env: TxEnv,
+pub(super) struct BinarySearchEstimationArgs<'a, HardforkT, SignedTransactionT> {
+    pub blockchain: &'a dyn BlockHashByNumber<Error = DynBlockchainError>,
+    pub header: &'a BlockHeader,
+    pub state: &'a dyn DynState,
+    pub cfg_env: CfgEnv<HardforkT>,
+    pub transaction: SignedTransactionT,
     pub lower_bound: u64,
     pub upper_bound: u64,
-    pub precompiles: &'a HashMap<Address, Precompile>,
-    pub trace_collector: &'a mut TraceCollector,
+    pub custom_precompiles: &'a HashMap<Address, PrecompileFn>,
+    pub observer_config: EvmObserverConfig,
+    pub scheduled_blob_params: Option<&'a ScheduledBlobParams>,
 }
 
 /// Search for a tight upper bound on the gas limit that will allow the
 /// transaction to execute. Matches Hardhat logic, except it's iterative, not
 /// recursive.
-pub(super) fn binary_search_estimation<LoggerErrorT: Debug>(
-    args: BinarySearchEstimationArgs<'_>,
-) -> Result<u64, ProviderError<LoggerErrorT>> {
+pub(super) fn binary_search_estimation<
+    ChainSpecT: ProviderChainSpec<SignedTransaction: TransactionMut>,
+>(
+    args: BinarySearchEstimationArgs<'_, ChainSpecT::Hardfork, ChainSpecT::SignedTransaction>,
+) -> Result<EstimateGasResult, ProviderErrorForChainSpec<ChainSpecT>> {
     const MAX_ITERATIONS: usize = 20;
 
     let BinarySearchEstimationArgs {
         blockchain,
         header,
         state,
-        state_overrides,
         cfg_env,
-        tx_env,
+        transaction,
         mut lower_bound,
         mut upper_bound,
-        precompiles,
-        trace_collector,
+        custom_precompiles,
+        observer_config,
+        scheduled_blob_params,
     } = args;
 
     let mut i = 0;
 
+    let mut call_trace_arenas = Vec::new();
     while upper_bound - lower_bound > min_difference(lower_bound) && i < MAX_ITERATIONS {
         let mut mid = lower_bound + (upper_bound - lower_bound) / 2;
         if i == 0 {
@@ -113,17 +125,36 @@ pub(super) fn binary_search_estimation<LoggerErrorT: Debug>(
             mid = cmp::min(mid, initial_mid);
         }
 
-        let success = check_gas_limit(CheckGasLimitArgs {
+        // Create a new observer for each check
+        let mut observer = EvmObserver::new(observer_config.clone());
+
+        let CheckGasLimitResult {
+            success,
+            precompile_addresses,
+        } = check_gas_limit::<ChainSpecT>(CheckGasLimitArgs {
             blockchain,
             header,
             state,
-            state_overrides,
             cfg_env: cfg_env.clone(),
-            tx_env: tx_env.clone(),
+            transaction: transaction.clone(),
             gas_limit: mid,
-            precompiles,
-            trace_collector,
+            custom_precompiles,
+            observer: &mut observer,
+            scheduled_blob_params,
         })?;
+
+        let EvmObservedData {
+            address_to_executed_code: _,
+            call_trace_arena,
+            encoded_console_logs: _,
+        } = observer.collect_and_report(&precompile_addresses)?;
+
+        if observer_config
+            .include_call_traces
+            .should_include(|| !success)
+        {
+            call_trace_arenas.push(call_trace_arena);
+        }
 
         if success {
             upper_bound = mid;
@@ -134,7 +165,10 @@ pub(super) fn binary_search_estimation<LoggerErrorT: Debug>(
         i += 1;
     }
 
-    Ok(upper_bound)
+    Ok(EstimateGasResult {
+        call_trace_arenas,
+        estimation: upper_bound,
+    })
 }
 
 // Matches Hardhat
@@ -156,30 +190,34 @@ fn min_difference(lower_bound: u64) -> u64 {
 }
 
 /// Compute miner rewards for percentiles.
-pub(super) fn compute_rewards<LoggerErrorT: Debug>(
-    block: &dyn SyncBlock<L1ChainSpec, Error = BlockchainError>,
+pub(super) fn compute_rewards<ChainSpecT: ProviderChainSpec>(
+    block: &ChainSpecT::Block,
     reward_percentiles: &[RewardPercentile],
-) -> Result<Vec<U256>, ProviderError<LoggerErrorT>> {
+) -> Result<Vec<U256>, ProviderErrorForChainSpec<ChainSpecT>> {
     if block.transactions().is_empty() {
         return Ok(reward_percentiles.iter().map(|_| U256::ZERO).collect());
     }
 
-    let base_fee_per_gas = block.header().base_fee_per_gas.unwrap_or_default();
+    let base_fee_per_gas = block.block_header().base_fee_per_gas.unwrap_or_default();
 
     let gas_used_and_effective_reward = block
-        .transaction_receipts()?
+        .fetch_transaction_receipts()
+        .map_err(ProviderError::FetchReceipt)?
         .iter()
         .enumerate()
         .map(|(i, receipt)| {
-            let transaction = &block.transactions()[i];
+            let transaction = block
+                .transactions()
+                .get(i)
+                .expect("receipt index should match transaction index");
 
-            let gas_used = receipt.gas_used;
+            let gas_used = receipt.gas_used();
             // gas price pre EIP-1559 and max fee per gas post EIP-1559
             let gas_price = transaction.gas_price();
 
             let effective_reward =
                 if let Some(max_priority_fee_per_gas) = transaction.max_priority_fee_per_gas() {
-                    cmp::min(max_priority_fee_per_gas, gas_price - base_fee_per_gas)
+                    cmp::min(*max_priority_fee_per_gas, gas_price - base_fee_per_gas)
                 } else {
                     gas_price.saturating_sub(base_fee_per_gas)
                 };
@@ -190,7 +228,7 @@ pub(super) fn compute_rewards<LoggerErrorT: Debug>(
         .collect::<Vec<(_, _)>>();
 
     // Ethereum block gas limit is 30 million, so it's safe to cast to f64.
-    let gas_limit = block.header().gas_limit as f64;
+    let gas_limit = block.block_header().gas_limit as f64;
 
     Ok(reward_percentiles
         .iter()
@@ -201,13 +239,13 @@ pub(super) fn compute_rewards<LoggerErrorT: Debug>(
             for (gas_used_by_tx, effective_reward) in &gas_used_and_effective_reward {
                 gas_used += gas_used_by_tx;
                 if target_gas <= gas_used {
-                    return *effective_reward;
+                    return U256::from(*effective_reward);
                 }
             }
 
             gas_used_and_effective_reward
                 .last()
-                .map_or(U256::ZERO, |(_, reward)| *reward)
+                .map_or(U256::ZERO, |(_, reward)| U256::from(*reward))
         })
         .collect())
 }

@@ -1,0 +1,65 @@
+[package]
+name = "foundry-evm-core"
+description = "Core EVM abstractions"
+
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+edr_common.workspace = true
+edr_defaults.workspace = true
+edr_artifact.workspace = true
+edr_macros.workspace = true
+foundry-cheatcodes-spec.workspace = true
+
+alloy-chains.workspace = true
+alloy-consensus.workspace = true
+alloy-genesis.workspace = true
+alloy-json-abi.workspace = true
+alloy-json-rpc.workspace = true
+alloy-network.workspace = true
+alloy-primitives = { workspace = true, features = ["serde", "getrandom", "arbitrary", "rlp"] }
+alloy-provider.workspace = true
+alloy-pubsub.workspace = true
+alloy-rpc-client.workspace = true
+alloy-rpc-types = { workspace = true, features = ["eth", "engine", "k256"] }
+alloy-sol-types.workspace = true
+alloy-transport.workspace = true
+alloy-transport-http = { workspace = true, features = ["reqwest", "reqwest-rustls-tls"] }
+alloy-transport-ws.workspace = true
+alloy-transport-ipc.workspace = true
+foundry-fork-db.workspace = true
+foundry-compilers.workspace = true
+
+op-revm.workspace = true
+revm.workspace = true
+revm-primitives.workspace = true
+
+auto_impl.workspace = true
+derive_more.workspace = true
+derive-where.workspace = true
+eyre = "0.6"
+futures = "0.3"
+itertools.workspace = true
+parking_lot.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror = "2"
+tokio = { workspace = true, features = ["time", "macros"] }
+tower.workspace = true
+tracing = "0.1"
+url = "2"
+
+[dev-dependencies]
+edr_test_utils.workspace = true
+
+axum.workspace = true
+similar-asserts.workspace = true
+tempfile = "3"
+
+[features]
+test-remote = []
+
+[lints]
+workspace = true

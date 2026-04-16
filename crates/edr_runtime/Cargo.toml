@@ -1,0 +1,44 @@
+[package]
+name = "edr_runtime"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+edr_chain_spec.workspace = true
+edr_chain_spec_evm.workspace = true
+edr_primitives.workspace = true
+edr_receipt.workspace = true
+edr_rpc_eth.workspace = true
+edr_transaction.workspace = true
+edr_state_api.workspace = true
+revm-handler.workspace = true
+revm-inspector.workspace = true
+revm-interpreter.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+criterion = { version = "0.4.0", default-features = false, features = ["cargo_bench_support", "html_reports", "plotters"] }
+edr_chain_l1.workspace = true
+edr_chain_spec_provider.workspace = true
+edr_defaults.workspace = true
+edr_eth = { workspace = true, features = ["serde"] }
+edr_generic.workspace = true
+edr_provider.workspace = true
+edr_state_fork.workspace = true
+edr_test_mem_pool.workspace = true
+edr_test_transaction.workspace = true
+edr_test_utils.workspace = true
+edr_utils.workspace = true
+lazy_static = "1.4.0"
+parking_lot.workspace = true
+paste = { version = "1.0.14", default-features = false }
+serial_test = "2.0.0"
+tempfile.workspace = true
+tokio = { version = "1.21.2", default-features = false, features = ["macros", "rt-multi-thread", "sync"] }
+
+[features]
+test-remote = []
+
+[lints]
+workspace = true

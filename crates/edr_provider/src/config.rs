@@ -1,27 +1,63 @@
 use std::{num::NonZeroU64, path::PathBuf, time::SystemTime};
 
-use edr_eth::{
-    block::BlobGas, spec::HardforkActivations, AccountInfo, Address, HashMap, SpecId, B256, U256,
-};
-use edr_evm::{alloy_primitives::ChainId, MineOrdering};
+use edr_block_header::BlobGas;
+use edr_block_miner::MineOrdering;
+use edr_chain_config::ChainOverride;
+use edr_eip1559::BaseFeeParams;
+use edr_precompile::PrecompileFn;
+use edr_primitives::{Address, Bytecode, ChainId, HashMap, B256, U256};
+use edr_state_api::EvmStorage;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-use crate::requests::{hardhat::rpc_types::ForkConfig, IntervalConfig as IntervalConfigRequest};
+use crate::{
+    observability::ObservabilityConfig, requests::IntervalConfig as IntervalConfigRequest,
+};
+
+/// Specification of overrides for an account and its storage.
+///
+/// Similar to `edr_state_api::Account` but without the `status` field and
+/// optional fields.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountOverride {
+    /// If present, the overwriting balance.
+    pub balance: Option<U256>,
+    /// If present, the overwriting nonce.
+    pub nonce: Option<u64>,
+    /// If present, the overwriting code.
+    pub code: Option<Bytecode>,
+    // TODO: Add support for this field
+    // TODO: https://github.com/NomicFoundation/edr/issues/911
+    /// If present, the overwriting storage
+    pub storage: Option<EvmStorage>,
+}
+
+/// Configuration for forking a blockchain
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Fork<HardforkT> {
+    pub block_number: Option<u64>,
+    pub cache_dir: PathBuf,
+    pub chain_overrides: HashMap<ChainId, ChainOverride<HardforkT>>,
+    pub http_headers: Option<std::collections::HashMap<String, String>>,
+    pub url: String,
+}
 
 /// Configuration for interval mining.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub enum IntervalConfig {
+#[serde(rename_all_fields = "camelCase")]
+pub enum Interval {
     Fixed(NonZeroU64),
     Range { min: u64, max: u64 },
 }
 
-impl IntervalConfig {
+impl Interval {
     /// Generates a (random) interval based on the configuration.
     pub fn generate_interval(&self) -> u64 {
         match self {
-            IntervalConfig::Fixed(interval) => interval.get(),
-            IntervalConfig::Range { min, max } => rand::thread_rng().gen_range(*min..=*max),
+            Interval::Fixed(interval) => interval.get(),
+            Interval::Range { min, max } => rand::rng().random_range(*min..=*max),
         }
     }
 }
@@ -35,19 +71,19 @@ pub enum IntervalConfigConversionError {
     MinGreaterThanMax,
 }
 
-impl TryInto<Option<IntervalConfig>> for IntervalConfigRequest {
+impl TryInto<Option<Interval>> for IntervalConfigRequest {
     type Error = IntervalConfigConversionError;
 
-    fn try_into(self) -> Result<Option<IntervalConfig>, Self::Error> {
+    fn try_into(self) -> Result<Option<Interval>, Self::Error> {
         match self {
             Self::FixedOrDisabled(0) => Ok(None),
             Self::FixedOrDisabled(value) => {
                 // Zero implies disabled
-                Ok(NonZeroU64::new(value).map(IntervalConfig::Fixed))
+                Ok(NonZeroU64::new(value).map(Interval::Fixed))
             }
             Self::Range([min, max]) => {
                 if max >= min {
-                    Ok(Some(IntervalConfig::Range { min, max }))
+                    Ok(Some(Interval::Range { min, max }))
                 } else {
                     Err(IntervalConfigConversionError::MinGreaterThanMax)
                 }
@@ -58,57 +94,55 @@ impl TryInto<Option<IntervalConfig>> for IntervalConfigRequest {
 
 /// Configuration for the provider's mempool.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct MemPoolConfig {
+#[serde(rename_all = "camelCase")]
+pub struct MemPool {
     pub order: MineOrdering,
 }
 
 /// Configuration for the provider's miner.
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct MiningConfig {
+#[serde(rename_all = "camelCase")]
+pub struct Mining {
     pub auto_mine: bool,
-    pub interval: Option<IntervalConfig>,
-    pub mem_pool: MemPoolConfig,
+    pub interval: Option<Interval>,
+    pub mem_pool: MemPool,
 }
 
 /// Configuration for the provider
-#[derive(Debug, Clone)]
-pub struct ProviderConfig {
+#[derive(Clone, Debug)]
+pub struct Provider<HardforkT> {
     pub allow_blocks_with_same_timestamp: bool,
     pub allow_unlimited_contract_size: bool,
-    pub accounts: Vec<AccountConfig>,
     /// Whether to return an `Err` when `eth_call` fails
     pub bail_on_call_failure: bool,
     /// Whether to return an `Err` when a `eth_sendTransaction` fails
     pub bail_on_transaction_failure: bool,
+    pub base_fee_params: Option<BaseFeeParams<HardforkT>>,
     pub block_gas_limit: NonZeroU64,
-    pub cache_dir: PathBuf,
     pub chain_id: ChainId,
-    pub chains: HashMap<ChainId, HardforkActivations>,
     pub coinbase: Address,
-    pub enable_rip_7212: bool,
-    pub fork: Option<ForkConfig>,
-    // Genesis accounts in addition to accounts. Useful for adding impersonated accounts for tests.
-    pub genesis_accounts: HashMap<Address, AccountInfo>,
-    pub hardfork: SpecId,
-    pub initial_base_fee_per_gas: Option<U256>,
+    pub fork: Option<Fork<HardforkT>>,
+    pub genesis_state: HashMap<Address, AccountOverride>,
+    pub hardfork: HardforkT,
+    pub initial_base_fee_per_gas: Option<u128>,
     pub initial_blob_gas: Option<BlobGas>,
     pub initial_date: Option<SystemTime>,
     pub initial_parent_beacon_block_root: Option<B256>,
-    pub min_gas_price: U256,
-    pub mining: MiningConfig,
+    pub min_gas_price: u128,
+    pub mining: Mining,
     pub network_id: u64,
+    pub observability: ObservabilityConfig,
+    pub owned_accounts: Vec<k256::SecretKey>,
+    pub precompile_overrides: HashMap<Address, PrecompileFn>,
+    /// Transaction gas cap, introduced in [EIP-7825].
+    ///
+    /// When not set, will default to value defined by the used hardfork
+    ///
+    /// [EIP-7825]: https://eips.ethereum.org/EIPS/eip-7825
+    pub transaction_gas_cap: Option<u64>,
 }
 
-/// Configuration input for a single account
-#[derive(Debug, Clone)]
-pub struct AccountConfig {
-    /// the secret key of the account
-    pub secret_key: k256::SecretKey,
-    /// the balance of the account
-    pub balance: U256,
-}
-
-impl Default for MemPoolConfig {
+impl Default for MemPool {
     fn default() -> Self {
         Self {
             order: MineOrdering::Priority,
@@ -116,12 +150,12 @@ impl Default for MemPoolConfig {
     }
 }
 
-impl Default for MiningConfig {
+impl Default for Mining {
     fn default() -> Self {
         Self {
             auto_mine: true,
             interval: None,
-            mem_pool: MemPoolConfig::default(),
+            mem_pool: MemPool::default(),
         }
     }
 }

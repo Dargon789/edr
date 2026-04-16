@@ -1,88 +1,120 @@
-mod account;
 mod call;
 mod gas;
 
 use std::{
     cmp::{self, Ordering},
     collections::BTreeMap,
-    ffi::OsString,
     fmt::Debug,
     num::{NonZeroU64, NonZeroUsize},
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
 use alloy_dyn_abi::eip712::TypedData;
+use alloy_eips::eip7825;
+use alloy_rpc_types::EIP1186AccountProofResponse;
+use alloy_rpc_types_trace::geth::GethDebugTracingOptions;
+use edr_block_api::{
+    Block, BlockAndTotalDifficulty, FetchBlockReceipts as _, GenesisBlockFactory,
+    GenesisBlockOptions,
+};
+use edr_block_builder_api::{BuiltBlockAndState, DatabaseComponents, WrapDatabaseRef};
+use edr_block_header::{
+    calculate_next_base_fee_per_blob_gas, BlockConfig, BlockHeader, HeaderOverrides,
+};
+use edr_block_miner::{
+    mine_block, mine_block_with_single_transaction, MineBlockResultAndStateWithMetadata,
+    MineBlockResultWithMetadata, MineBlockResultWithMetadataForChainSpec,
+};
+use edr_blockchain_api::{
+    r#dyn::{DynBlockchain, DynBlockchainError},
+    BlockHashByNumber, BlockchainMetadata, GetBlockchainBlock as _, StateAtBlock as _,
+};
+use edr_blockchain_fork::ForkedBlockchainCreationError as ForkedCreationError;
+use edr_chain_config::ChainConfig;
+use edr_chain_spec::{
+    BlockEnvConstructor as _, ChainSpec, EvmSpecId, ExecutableTransaction, HaltReasonTrait,
+    TransactionValidation,
+};
+use edr_chain_spec_block::BlockChainSpec;
+use edr_chain_spec_evm::{config::EvmConfig, result::ExecutionResult, CfgEnv};
+use edr_chain_spec_provider::ProviderChainSpec;
+use edr_eip1559::BaseFeeParams;
+use edr_eip7892::ScheduledBlobParams;
 use edr_eth::{
-    block::{
-        calculate_next_base_fee_per_blob_gas, calculate_next_base_fee_per_gas, miner_reward,
-        BlobGas, BlockOptions, Header,
-    },
+    block::miner_reward,
     fee_history::FeeHistoryResult,
     filter::{FilteredEvents, LogOutput, SubscriptionType},
-    log::FilterLog,
-    receipt::BlockReceipt,
     reward_percentile::RewardPercentile,
-    signature::{self, RecoveryMessage},
-    transaction::{request::TransactionRequestAndSender, Signed, Transaction, TransactionType},
-    Address, BlockSpec, BlockTag, Bytes, Eip1898BlockSpec, SpecId, B256, U256,
+    BlockSpec, BlockTag, Eip1898BlockSpec,
 };
-use edr_evm::{
-    blockchain::{
-        Blockchain, BlockchainError, ForkedBlockchain, ForkedBlockchainError, ForkedCreationError,
-        GenesisBlockOptions, LocalBlockchain, LocalCreationError, SyncBlockchain,
-    },
-    chain_spec::{ChainSpec, L1ChainSpec},
-    db::StateRef,
-    debug_trace_transaction, execution_result_to_debug_result, mempool, mine_block,
-    mine_block_with_single_transaction, register_eip_3155_and_raw_tracers_handles,
-    state::{
-        AccountModifierFn, IrregularState, StateDiff, StateError, StateOverride, StateOverrides,
-        SyncState,
-    },
-    trace::Trace,
-    transaction::{self, SignedTransaction as _},
-    Account, AccountInfo, BlobExcessGasAndPrice, Block as _, BlockAndTotalDifficulty, BlockEnv,
-    Bytecode, CfgEnv, CfgEnvWithHandlerCfg, DebugContext, DebugTraceConfig,
-    DebugTraceResultWithTraces, Eip3155AndRawTracers, EvmStorageSlot, ExecutionResult, HashMap,
-    HashSet, IntoRemoteBlock, MemPool, MineBlockResultAndState, OrderedTransaction, Precompile,
-    RandomHashGenerator, RemoteBlockCreationError, SyncBlock, TxEnv, KECCAK_EMPTY,
+use edr_evm::guaranteed_dry_run_with_inspector;
+use edr_gas_report::{GasReport, SyncOnCollectedGasReportCallback};
+use edr_mem_pool::{account_next_nonce, MemPool, OrderedTransaction};
+use edr_precompile::PrecompileFn;
+use edr_primitives::{
+    Address, Bytecode, Bytes, HashMap, HashSet, StorageKey, B256, KECCAK_EMPTY, U256,
 };
-use edr_rpc_eth::{
-    client::{EthRpcClient, HeaderMap, RpcClientError},
-    error::HttpError,
-    RpcTransactionType,
+use edr_receipt::{log::FilterLog, ExecutionReceipt, ReceiptTrait as _};
+use edr_rpc_eth::client::{EthRpcClient, EthRpcClientForChainSpec, HeaderMap};
+use edr_runtime::{
+    inspector::DualInspector,
+    overrides::{StateOverrides, StateRefOverrider},
+    transaction,
 };
-use edr_solidity::contract_decoder::{ContractDecoder, ContractDecoderError};
+use edr_signer::{
+    public_key_to_address, FakeSign as _, RecoveryMessage, Sign as _, SignatureWithRecoveryId,
+};
+use edr_solidity::{config::IncludeTraces, contract_decoder::ContractDecoder};
+use edr_state_api::{
+    account::{Account, AccountInfo, AccountStatus},
+    irregular::IrregularState,
+    AccountModifierFn, DynState, EvmStorageSlot, StateDiff, StateOverride,
+};
+use edr_transaction::{
+    request::TransactionRequestAndSender, BlockDataForTransaction, IsEip4844, IsSupported as _,
+    TransactionAndBlock, TransactionMut, TransactionType, TxKind,
+};
+use edr_utils::{random::RandomHashGenerator, CastArcInto};
+use foundry_evm_traces::CallTraceArena;
 use gas::gas_used_ratio;
 use indexmap::IndexMap;
 use itertools::izip;
 use lru::LruCache;
-use revm_precompile::secp256r1;
+use parking_lot::RwLock;
+use revm_inspectors::tracing::DebugInspector;
 use rpds::HashTrieMapSync;
 use tokio::runtime;
 
-use self::account::{create_accounts, InitialAccounts};
 use crate::{
     data::{
-        call::{run_call, RunCallArgs},
-        gas::{compute_rewards, BinarySearchEstimationArgs, CheckGasLimitArgs},
+        call::BlockEnvWithZeroBaseFee,
+        gas::{
+            compute_rewards, BinarySearchEstimationArgs, CheckGasLimitArgs, CheckGasLimitResult,
+        },
     },
-    debug_mine::{DebugMineBlockResult, DebugMineBlockResultAndState},
-    debugger::{register_debugger_handles, Debugger},
-    error::{EstimateGasFailure, TransactionFailure, TransactionFailureWithTraces},
+    debug_trace::{debug_trace_transaction, DebugTraceResultWithCallTraces},
+    error::{
+        CreationError, CreationErrorForChainSpec, EstimateGasFailure, ProviderErrorForChainSpec,
+        TransactionFailure, TransactionFailureWithCallTraces,
+    },
     filter::{bloom_contains_log_filter, filter_logs, Filter, FilterData, LogFilter},
     logger::SyncLogger,
-    mock::{Mocker, SyncCallOverride},
+    mock::SyncCallOverride,
+    observability::{EvmObservedData, EvmObserver, EvmObserverConfig, ObservabilityConfig},
     pending::BlockchainWithPending,
-    requests::hardhat::rpc_types::{ForkConfig, ForkMetadata},
+    requests::hardhat::rpc_types::ForkMetadata,
     snapshot::Snapshot,
+    spec::{
+        ForkedBlockchainForChainSpec, LocalBlockchainForChainSpec, ProviderSpec,
+        SyncBlockchainForChainSpec, SyncProviderSpec, TransactionAndBlockForChainSpec,
+    },
     time::{CurrentTime, TimeSinceEpoch},
-    MiningConfig, ProviderConfig, ProviderError, SubscriptionEvent, SubscriptionEventData,
-    SyncSubscriberCallback,
+    DebugTraceError, ForkConfig, MiningConfig, ProviderConfig, ProviderError, SubscriptionEvent,
+    SubscriptionEventData, SyncSubscriberCallback,
 };
 
-const DEFAULT_INITIAL_BASE_FEE_PER_GAS: u64 = 1_000_000_000;
+const DEFAULT_INITIAL_BASE_FEE_PER_GAS: u128 = 1_000_000_000;
 const EDR_MAX_CACHED_STATES_ENV_VAR: &str = "__EDR_MAX_CACHED_STATES";
 const DEFAULT_MAX_CACHED_STATES: usize = 100_000;
 const EDR_UNSAFE_SKIP_UNSUPPORTED_TRANSACTION_TYPES: &str =
@@ -91,35 +123,109 @@ const DEFAULT_SKIP_UNSUPPORTED_TRANSACTION_TYPES: bool = false;
 
 /// The result of executing an `eth_call`.
 #[derive(Clone, Debug)]
-pub struct CallResult {
+pub struct CallResult<HaltReasonT: HaltReasonTrait> {
+    pub call_trace_arena: Option<CallTraceArena>,
+    pub execution_result: ExecutionResult<HaltReasonT>,
+}
+
+pub struct CallResultWithMetadata<HaltReasonT: HaltReasonTrait> {
+    /// Mapping of contract address to executed bytecode
+    pub address_to_executed_code: HashMap<Address, Bytes>,
+    pub call_trace_arena: CallTraceArena,
     pub console_log_inputs: Vec<Bytes>,
-    pub execution_result: ExecutionResult,
-    pub trace: Trace,
+    pub execution_result: ExecutionResult<HaltReasonT>,
+    /// The set of precompile addresses that were available during execution.
+    pub precompile_addresses: HashSet<Address>,
+}
+
+impl<HaltReasonT: HaltReasonTrait> CallResultWithMetadata<HaltReasonT> {
+    /// Converts into a [`CallResult`], discarding metadata.
+    pub fn into_call_result(self, include_traces: IncludeTraces) -> CallResult<HaltReasonT> {
+        CallResult {
+            call_trace_arena: if include_traces
+                .should_include(|| !self.execution_result.is_success())
+            {
+                Some(self.call_trace_arena)
+            } else {
+                None
+            },
+            execution_result: self.execution_result,
+        }
+    }
 }
 
 #[derive(Clone)]
 pub struct EstimateGasResult {
+    pub call_trace_arenas: Vec<CallTraceArena>,
     pub estimation: u64,
-    pub traces: Vec<Trace>,
 }
 
-pub struct SendTransactionResult {
+/// Helper type for a chain-specific [`SendTransactionResult`].
+pub type SendTransactionResultForChainSpec<ChainSpecT> = SendTransactionResult<
+    Arc<<ChainSpecT as BlockChainSpec>::Block>,
+    <ChainSpecT as ChainSpec>::HaltReason,
+    <ChainSpecT as ChainSpec>::SignedTransaction,
+>;
+
+#[derive(Debug)]
+pub struct SendTransactionResult<BlockT, HaltReasonT: HaltReasonTrait, SignedTransactionT> {
     pub transaction_hash: B256,
-    pub mining_results: Vec<DebugMineBlockResult<BlockchainError>>,
+    pub mining_results:
+        Vec<MineBlockResultWithMetadata<BlockT, HaltReasonT, SignedTransactionT, EvmObservedData>>,
 }
 
-impl SendTransactionResult {
+impl<BlockT, HaltReasonT: HaltReasonTrait, SignedTransactionT>
+    SendTransactionResult<BlockT, HaltReasonT, SignedTransactionT>
+{
+    pub fn into_hash_and_call_traces(
+        self,
+        include_call_traces: IncludeTraces,
+    ) -> (B256, Vec<CallTraceArena>) {
+        let Self {
+            transaction_hash,
+            mining_results,
+        } = self;
+
+        let traces = mining_results
+            .into_iter()
+            .flat_map(|result| {
+                result
+                    .transaction_inspector_data
+                    .into_iter()
+                    .zip(result.transaction_results)
+                    .filter_map(|(observed_data, transaction_result)| {
+                        if include_call_traces.should_include(|| !transaction_result.is_success()) {
+                            Some(observed_data.call_trace_arena)
+                        } else {
+                            None
+                        }
+                    })
+            })
+            .collect();
+
+        (transaction_hash, traces)
+    }
+}
+
+impl<
+        BlockT: Block<SignedTransactionT>,
+        HaltReasonT: HaltReasonTrait,
+        SignedTransactionT: ExecutableTransaction,
+    > SendTransactionResult<BlockT, HaltReasonT, SignedTransactionT>
+{
     /// Present if the transaction was auto-mined.
-    pub fn transaction_result_and_trace(&self) -> Option<(&ExecutionResult, &Trace)> {
+    pub fn transaction_result_and_observed_data(
+        &self,
+    ) -> Option<ExecutionResultAndObservedData<'_, HaltReasonT>> {
         self.mining_results.iter().find_map(|result| {
             izip!(
                 result.block.transactions().iter(),
                 result.transaction_results.iter(),
-                result.transaction_traces.iter()
+                result.transaction_inspector_data.iter()
             )
-            .find_map(|(transaction, result, trace)| {
+            .find_map(|(transaction, exec_result, trace)| {
                 if *transaction.transaction_hash() == self.transaction_hash {
-                    Some((result, trace))
+                    Some((exec_result, trace))
                 } else {
                     None
                 }
@@ -128,262 +234,97 @@ impl SendTransactionResult {
     }
 }
 
-impl From<SendTransactionResult> for (B256, Vec<Trace>) {
-    fn from(value: SendTransactionResult) -> Self {
-        let SendTransactionResult {
-            transaction_hash,
-            mining_results,
-        } = value;
+/// The result of executing a transaction.
+pub type ExecutionResultAndObservedData<'provider, HaltReasonT> = (
+    &'provider ExecutionResult<HaltReasonT>,
+    &'provider EvmObservedData,
+);
 
-        let traces = mining_results
-            .into_iter()
-            .flat_map(|result| result.transaction_traces)
-            .collect();
-
-        (transaction_hash, traces)
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum CreationError {
-    /// A blockchain error
-    #[error(transparent)]
-    Blockchain(BlockchainError),
-    /// A contract decoder error
-    #[error(transparent)]
-    ContractDecoder(#[from] ContractDecoderError),
-    /// An error that occurred while constructing a forked blockchain.
-    #[error(transparent)]
-    ForkedBlockchainCreation(#[from] ForkedCreationError),
-    #[error("Invalid HTTP header name: {0}")]
-    InvalidHttpHeaders(HttpError),
-    /// Invalid initial date
-    #[error("The initial date configuration value {0:?} is before the UNIX epoch")]
-    InvalidInitialDate(SystemTime),
-    #[error("Invalid max cached states environment variable value: '{0:?}'. Please provide a non-zero integer!")]
-    InvalidMaxCachedStates(OsString),
-    /// An error that occurred while constructing a local blockchain.
-    #[error(transparent)]
-    LocalBlockchainCreation(#[from] LocalCreationError),
-    /// An error that occured while querying the remote state.
-    #[error(transparent)]
-    RpcClient(#[from] RpcClientError),
-}
-
-pub struct ProviderData<LoggerErrorT: Debug, TimerT: Clone + TimeSinceEpoch = CurrentTime> {
+pub struct ProviderData<
+    ChainSpecT: ProviderSpec<TimerT>,
+    TimerT: Clone + TimeSinceEpoch = CurrentTime,
+> {
     runtime_handle: runtime::Handle,
-    initial_config: ProviderConfig,
-    blockchain: Box<dyn SyncBlockchain<L1ChainSpec, BlockchainError, StateError>>,
+    /// Whether to return an `Err` when `eth_call` fails
+    bail_on_call_failure: bool,
+    /// Whether to return an `Err` when a `eth_sendTransaction` fails
+    bail_on_transaction_failure: bool,
+    blockchain: Box<dyn SyncBlockchainForChainSpec<ChainSpecT>>,
+    block_config: BlockConfig<ChainSpecT::Hardfork>,
     pub irregular_state: IrregularState,
-    mem_pool: MemPool,
+    mem_pool: MemPool<ChainSpecT::SignedTransaction>,
+    mining_config: MiningConfig,
+    network_id: u64,
+    observability: ObservabilityConfig,
+    precompile_overrides: HashMap<Address, PrecompileFn>,
     beneficiary: Address,
-    custom_precompiles: HashMap<Address, Precompile>,
-    dao_activation_block: Option<u64>,
-    min_gas_price: U256,
+    min_gas_price: u128,
     parent_beacon_block_root_generator: RandomHashGenerator,
     prev_randao_generator: RandomHashGenerator,
     block_time_offset_seconds: i64,
     fork_metadata: Option<ForkMetadata>,
     // Must be set if the provider is created with a fork config.
     // Hack to get around the type erasure with the dyn blockchain trait.
-    rpc_client: Option<Arc<EthRpcClient<L1ChainSpec>>>,
+    rpc_client: Option<Arc<EthRpcClientForChainSpec<ChainSpecT>>>,
     instance_id: B256,
     is_auto_mining: bool,
-    next_block_base_fee_per_gas: Option<U256>,
+    next_block_base_fee_per_gas: Option<u128>,
+    base_fee_params: Option<BaseFeeParams<ChainSpecT::Hardfork>>,
     next_block_timestamp: Option<u64>,
     next_snapshot_id: u64,
-    snapshots: BTreeMap<u64, Snapshot>,
+    snapshots: BTreeMap<u64, Snapshot<ChainSpecT::SignedTransaction>>,
     allow_blocks_with_same_timestamp: bool,
     allow_unlimited_contract_size: bool,
-    verbose_tracing: bool,
     // Skip unsupported transaction types in `debugTraceTransaction` instead of throwing an error
     skip_unsupported_transaction_types: bool,
     // IndexMap to preserve account order for logging.
     local_accounts: IndexMap<Address, k256::SecretKey>,
     filters: HashMap<U256, Filter>,
     last_filter_id: U256,
-    logger: Box<dyn SyncLogger<BlockchainError = BlockchainError, LoggerError = LoggerErrorT>>,
+    logger: Box<dyn SyncLogger<ChainSpecT, TimerT>>,
     impersonated_accounts: HashSet<Address>,
-    subscriber_callback: Box<dyn SyncSubscriberCallback>,
+    subscriber_callback:
+        Box<dyn SyncSubscriberCallback<ChainSpecT::Block, ChainSpecT::SignedTransaction>>,
     timer: TimerT,
-    call_override: Option<Arc<dyn SyncCallOverride>>,
     // We need the Arc to let us avoid returning references to the cache entries which need &mut
     // self to get.
-    block_state_cache: LruCache<StateId, Arc<Box<dyn SyncState<StateError>>>>,
+    block_state_cache: LruCache<StateId, Arc<Box<dyn DynState>>>,
     current_state_id: StateId,
     block_number_to_state_id: HashTrieMapSync<u64, StateId>,
-    contract_decoder: Arc<ContractDecoder>,
+    contract_decoder: Arc<RwLock<ContractDecoder>>,
 }
 
-impl<LoggerErrorT: Debug, TimerT: Clone + TimeSinceEpoch> ProviderData<LoggerErrorT, TimerT> {
-    pub fn new(
-        runtime_handle: runtime::Handle,
-        logger: Box<dyn SyncLogger<BlockchainError = BlockchainError, LoggerError = LoggerErrorT>>,
-        subscriber_callback: Box<dyn SyncSubscriberCallback>,
-        call_override: Option<Arc<dyn SyncCallOverride>>,
-        config: ProviderConfig,
-        contract_decoder: Arc<ContractDecoder>,
-        timer: TimerT,
-    ) -> Result<Self, CreationError> {
-        let InitialAccounts {
-            local_accounts,
-            genesis_accounts,
-        } = create_accounts(&config);
-
-        let BlockchainAndState {
-            blockchain,
-            fork_metadata,
-            rpc_client,
-            state,
-            irregular_state,
-            prev_randao_generator,
-            block_time_offset_seconds,
-            next_block_base_fee_per_gas,
-        } = create_blockchain_and_state(runtime_handle.clone(), &config, &timer, genesis_accounts)?;
-
-        let max_cached_states = get_max_cached_states_from_env()?;
-        let mut block_state_cache = LruCache::new(max_cached_states);
-        let mut block_number_to_state_id = HashTrieMapSync::default();
-
-        let current_state_id = StateId::default();
-        block_state_cache.push(current_state_id, Arc::new(state));
-        block_number_to_state_id.insert_mut(blockchain.last_block_number(), current_state_id);
-
-        let allow_blocks_with_same_timestamp = config.allow_blocks_with_same_timestamp;
-        let allow_unlimited_contract_size = config.allow_unlimited_contract_size;
-        let beneficiary = config.coinbase;
-        let block_gas_limit = config.block_gas_limit;
-        let is_auto_mining = config.mining.auto_mine;
-        let min_gas_price = config.min_gas_price;
-
-        let skip_unsupported_transaction_types = get_skip_unsupported_transaction_types_from_env();
-
-        let dao_activation_block = config
-            .chains
-            .get(&config.chain_id)
-            .and_then(|config| config.hardfork_activation(SpecId::DAO_FORK));
-
-        let parent_beacon_block_root_generator = if let Some(initial_parent_beacon_block_root) =
-            &config.initial_parent_beacon_block_root
-        {
-            RandomHashGenerator::with_value(*initial_parent_beacon_block_root)
-        } else {
-            RandomHashGenerator::with_seed("randomParentBeaconBlockRootSeed")
-        };
-
-        let custom_precompiles = {
-            let mut precompiles = HashMap::new();
-
-            if config.enable_rip_7212 {
-                // EIP-7212: secp256r1 P256verify
-                precompiles.insert(secp256r1::P256VERIFY.0, secp256r1::P256VERIFY.1);
-            }
-
-            precompiles
-        };
-
-        Ok(Self {
-            runtime_handle,
-            initial_config: config,
-            blockchain,
-            irregular_state,
-            mem_pool: MemPool::new(block_gas_limit),
-            beneficiary,
-            custom_precompiles,
-            dao_activation_block,
-            min_gas_price,
-            parent_beacon_block_root_generator,
-            prev_randao_generator,
-            block_time_offset_seconds,
-            fork_metadata,
-            rpc_client,
-            instance_id: B256::random(),
-            is_auto_mining,
-            next_block_base_fee_per_gas,
-            next_block_timestamp: None,
-            // Start with 1 to mimic Ganache
-            next_snapshot_id: 1,
-            snapshots: BTreeMap::new(),
-            allow_blocks_with_same_timestamp,
-            allow_unlimited_contract_size,
-            verbose_tracing: false,
-            skip_unsupported_transaction_types,
-            local_accounts,
-            filters: HashMap::default(),
-            last_filter_id: U256::ZERO,
-            logger,
-            impersonated_accounts: HashSet::new(),
-            subscriber_callback,
-            timer,
-            call_override,
-            block_state_cache,
-            current_state_id,
-            block_number_to_state_id,
-            contract_decoder,
-        })
-    }
-
-    pub fn set_call_override_callback(&mut self, call_override: Option<Arc<dyn SyncCallOverride>>) {
-        self.call_override = call_override;
-    }
-
-    pub fn reset(&mut self, fork_config: Option<ForkConfig>) -> Result<(), CreationError> {
-        let mut config = self.initial_config.clone();
-        config.fork = fork_config;
-
-        let mut reset_instance = Self::new(
-            self.runtime_handle.clone(),
-            self.logger.clone(),
-            self.subscriber_callback.clone(),
-            self.call_override.clone(),
-            config,
-            // `hardhat_reset` doesn't discard contract metadata added with
-            // `hardhat_addCompilationResult`
-            Arc::clone(&self.contract_decoder),
-            self.timer.clone(),
-        )?;
-
-        std::mem::swap(self, &mut reset_instance);
-
-        Ok(())
-    }
-
-    /// Retrieves the last pending nonce of the account corresponding to the
-    /// provided address, if it exists.
-    pub fn account_next_nonce(
-        &mut self,
-        address: &Address,
-    ) -> Result<u64, ProviderError<LoggerErrorT>> {
-        let state = self.current_state()?;
-        mempool::account_next_nonce(&self.mem_pool, &*state, address).map_err(Into::into)
-    }
-
+impl<ChainSpecT, TimerT> ProviderData<ChainSpecT, TimerT>
+where
+    ChainSpecT: ProviderSpec<TimerT>,
+    TimerT: Clone + TimeSinceEpoch,
+{
     pub fn accounts(&self) -> impl Iterator<Item = &Address> {
         self.local_accounts.keys()
+    }
+
+    /// Adds a filter for new pending transactions to the provider.
+    pub fn add_pending_transaction_filter<const IS_SUBSCRIPTION: bool>(&mut self) -> U256 {
+        let filter_id = self.next_filter_id();
+        self.filters.insert(
+            filter_id,
+            Filter::new_pending_transaction_filter(IS_SUBSCRIPTION),
+        );
+        filter_id
     }
 
     pub fn allow_unlimited_initcode_size(&self) -> bool {
         self.allow_unlimited_contract_size
     }
 
-    /// Returns whether the miner is mining automatically.
-    pub fn is_auto_mining(&self) -> bool {
-        self.is_auto_mining
+    /// Whether the provider is configured to bail on call failures.
+    pub fn bail_on_call_failure(&self) -> bool {
+        self.bail_on_call_failure
     }
 
-    pub fn balance(
-        &mut self,
-        address: Address,
-        block_spec: Option<&BlockSpec>,
-    ) -> Result<U256, ProviderError<LoggerErrorT>> {
-        self.execute_in_block_context::<Result<U256, ProviderError<LoggerErrorT>>>(
-            block_spec,
-            move |_blockchain, _block, state| {
-                Ok(state
-                    .basic(address)?
-                    .map_or(U256::ZERO, |account| account.balance))
-            },
-        )?
+    /// Whether the provider is configured to bail on transaction failures.
+    pub fn bail_on_transaction_failure(&self) -> bool {
+        self.bail_on_transaction_failure
     }
 
     /// Retrieves the gas limit of the next block.
@@ -391,8 +332,12 @@ impl<LoggerErrorT: Debug, TimerT: Clone + TimeSinceEpoch> ProviderData<LoggerErr
         self.mem_pool.block_gas_limit().get()
     }
 
-    /// Get the locked contract decoder.
-    pub fn contract_decoder(&self) -> &ContractDecoder {
+    pub fn coinbase(&self) -> Address {
+        self.beneficiary
+    }
+
+    /// Get the contract decoder lock.
+    pub fn contract_decoder(&self) -> &RwLock<ContractDecoder> {
         &self.contract_decoder
     }
 
@@ -410,670 +355,16 @@ impl<LoggerErrorT: Debug, TimerT: Clone + TimeSinceEpoch> ProviderData<LoggerErr
         self.fork_metadata.as_ref()
     }
 
-    /// Returns the last block in the blockchain.
-    pub fn last_block(
-        &self,
-    ) -> Result<Arc<dyn SyncBlock<L1ChainSpec, Error = BlockchainError>>, BlockchainError> {
-        self.blockchain.last_block()
-    }
-
-    /// Returns the number of the last block in the blockchain.
-    pub fn last_block_number(&self) -> u64 {
-        self.blockchain.last_block_number()
-    }
-
-    /// Adds a filter for new blocks to the provider.
-    pub fn add_block_filter<const IS_SUBSCRIPTION: bool>(
-        &mut self,
-    ) -> Result<U256, ProviderError<LoggerErrorT>> {
-        let block_hash = *self.last_block()?.hash();
-
-        let filter_id = self.next_filter_id();
-        self.filters.insert(
-            filter_id,
-            Filter::new_block_filter(block_hash, IS_SUBSCRIPTION),
-        );
-
-        Ok(filter_id)
-    }
-
-    /// Adds a filter for new logs to the provider.
-    pub fn add_log_filter<const IS_SUBSCRIPTION: bool>(
-        &mut self,
-        criteria: LogFilter,
-    ) -> Result<U256, ProviderError<LoggerErrorT>> {
-        let logs = self
-            .blockchain
-            .logs(
-                criteria.from_block,
-                criteria
-                    .to_block
-                    .unwrap_or(self.blockchain.last_block_number()),
-                &criteria.addresses,
-                &criteria.normalized_topics,
-            )?
-            .iter()
-            .map(LogOutput::from)
-            .collect();
-
-        let filter_id = self.next_filter_id();
-        self.filters.insert(
-            filter_id,
-            Filter::new_log_filter(criteria, logs, IS_SUBSCRIPTION),
-        );
-        Ok(filter_id)
-    }
-
-    /// Adds a filter for new pending transactions to the provider.
-    pub fn add_pending_transaction_filter<const IS_SUBSCRIPTION: bool>(&mut self) -> U256 {
-        let filter_id = self.next_filter_id();
-        self.filters.insert(
-            filter_id,
-            Filter::new_pending_transaction_filter(IS_SUBSCRIPTION),
-        );
-        filter_id
-    }
-
-    /// Whether the provider is configured to bail on call failures.
-    pub fn bail_on_call_failure(&self) -> bool {
-        self.initial_config.bail_on_call_failure
-    }
-
-    /// Whether the provider is configured to bail on transaction failures.
-    pub fn bail_on_transaction_failure(&self) -> bool {
-        self.initial_config.bail_on_transaction_failure
-    }
-
-    /// Fetch a block by block spec.
-    /// Returns `None` if the block spec is `pending`.
-    /// Returns `ProviderError::InvalidBlockSpec` error if the block spec is a
-    /// number or a hash and the block isn't found.
-    /// Returns `ProviderError::InvalidBlockTag` error if the block tag is safe
-    /// or finalized and block spec is pre-merge.
-    // `SyncBlock` cannot be simplified further
-    #[allow(clippy::type_complexity)]
-    pub fn block_by_block_spec(
-        &self,
-        block_spec: &BlockSpec,
-    ) -> Result<
-        Option<Arc<dyn SyncBlock<L1ChainSpec, Error = BlockchainError>>>,
-        ProviderError<LoggerErrorT>,
-    > {
-        let result = match block_spec {
-            BlockSpec::Number(block_number) => Some(
-                self.blockchain
-                    .block_by_number(*block_number)?
-                    .ok_or_else(|| ProviderError::InvalidBlockNumberOrHash {
-                        block_spec: block_spec.clone(),
-                        latest_block_number: self.blockchain.last_block_number(),
-                    })?,
-            ),
-            BlockSpec::Tag(BlockTag::Earliest) => Some(
-                self.blockchain
-                    .block_by_number(0)?
-                    .expect("genesis block should always exist"),
-            ),
-            // Matching Hardhat behaviour by returning the last block for finalized and safe.
-            // https://github.com/NomicFoundation/hardhat/blob/b84baf2d9f5d3ea897c06e0ecd5e7084780d8b6c/packages/hardhat-core/src/internal/hardhat-network/provider/modules/eth.ts#L1395
-            BlockSpec::Tag(tag @ (BlockTag::Finalized | BlockTag::Safe)) => {
-                if self.spec_id() >= SpecId::MERGE {
-                    Some(self.blockchain.last_block()?)
-                } else {
-                    return Err(ProviderError::InvalidBlockTag {
-                        block_tag: *tag,
-                        spec: self.spec_id(),
-                    });
-                }
-            }
-            BlockSpec::Tag(BlockTag::Latest) => Some(self.blockchain.last_block()?),
-            BlockSpec::Tag(BlockTag::Pending) => None,
-            BlockSpec::Eip1898(Eip1898BlockSpec::Hash {
-                block_hash,
-                require_canonical: _,
-            }) => Some(self.blockchain.block_by_hash(block_hash)?.ok_or_else(|| {
-                ProviderError::InvalidBlockNumberOrHash {
-                    block_spec: block_spec.clone(),
-                    latest_block_number: self.blockchain.last_block_number(),
-                }
-            })?),
-            BlockSpec::Eip1898(Eip1898BlockSpec::Number { block_number }) => Some(
-                self.blockchain
-                    .block_by_number(*block_number)?
-                    .ok_or_else(|| ProviderError::InvalidBlockNumberOrHash {
-                        block_spec: block_spec.clone(),
-                        latest_block_number: self.blockchain.last_block_number(),
-                    })?,
-            ),
-        };
-
-        Ok(result)
-    }
-
-    /// Retrieves the block number for the provided block spec, if it exists.
-    fn block_number_by_block_spec(
-        &self,
-        block_spec: &BlockSpec,
-    ) -> Result<Option<u64>, ProviderError<LoggerErrorT>> {
-        let block_number = match block_spec {
-            BlockSpec::Number(number) => Some(*number),
-            BlockSpec::Tag(BlockTag::Earliest) => Some(0),
-            BlockSpec::Tag(tag @ (BlockTag::Finalized | BlockTag::Safe)) => {
-                if self.spec_id() >= SpecId::MERGE {
-                    Some(self.blockchain.last_block_number())
-                } else {
-                    return Err(ProviderError::InvalidBlockTag {
-                        block_tag: *tag,
-                        spec: self.spec_id(),
-                    });
-                }
-            }
-            BlockSpec::Tag(BlockTag::Latest) => Some(self.blockchain.last_block_number()),
-            BlockSpec::Tag(BlockTag::Pending) => None,
-            BlockSpec::Eip1898(Eip1898BlockSpec::Hash { block_hash, .. }) => {
-                self.blockchain.block_by_hash(block_hash)?.map_or_else(
-                    || {
-                        Err(ProviderError::InvalidBlockNumberOrHash {
-                            block_spec: block_spec.clone(),
-                            latest_block_number: self.blockchain.last_block_number(),
-                        })
-                    },
-                    |block| Ok(Some(block.header().number)),
-                )?
-            }
-            BlockSpec::Eip1898(Eip1898BlockSpec::Number { block_number }) => Some(*block_number),
-        };
-
-        Ok(block_number)
-    }
-
-    // `SyncBlock` cannot be simplified further
-    #[allow(clippy::type_complexity)]
-    pub fn block_by_hash(
-        &self,
-        block_hash: &B256,
-    ) -> Result<
-        Option<Arc<dyn SyncBlock<L1ChainSpec, Error = BlockchainError>>>,
-        ProviderError<LoggerErrorT>,
-    > {
-        self.blockchain
-            .block_by_hash(block_hash)
-            .map_err(ProviderError::Blockchain)
-    }
-
-    pub fn chain_id(&self) -> u64 {
-        self.blockchain.chain_id()
-    }
-
-    pub fn chain_id_at_block_spec(
-        &self,
-        block_spec: &BlockSpec,
-    ) -> Result<u64, ProviderError<LoggerErrorT>> {
-        let block_number = self.block_number_by_block_spec(block_spec)?;
-
-        let chain_id = if let Some(block_number) = block_number {
-            self.chain_id_at_block_number(block_number, block_spec)?
-        } else {
-            self.blockchain.chain_id()
-        };
-
-        Ok(chain_id)
-    }
-    pub fn coinbase(&self) -> Address {
-        self.beneficiary
-    }
-
-    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip(self)))]
-    pub fn debug_trace_transaction(
-        &mut self,
-        transaction_hash: &B256,
-        trace_config: DebugTraceConfig,
-    ) -> Result<DebugTraceResultWithTraces, ProviderError<LoggerErrorT>> {
-        let (header, transactions) =
-            self.block_data_for_debug_trace_transaction(transaction_hash)?;
-
-        let cfg_env = self.create_evm_config_at_block_spec(&BlockSpec::Number(header.number))?;
-
-        let prev_block_number = header.number - 1;
-        let prev_block_spec = Some(BlockSpec::Number(prev_block_number));
-        let verbose_tracing = self.verbose_tracing;
-
-        self.execute_in_block_context(
-            prev_block_spec.as_ref(),
-            |blockchain, _prev_block, state| {
-                let block_env = BlockEnv {
-                    number: U256::from(header.number),
-                    coinbase: header.beneficiary,
-                    timestamp: U256::from(header.timestamp),
-                    gas_limit: U256::from(header.gas_limit),
-                    basefee: header.base_fee_per_gas.unwrap_or_default(),
-                    difficulty: U256::from(header.difficulty),
-                    prevrandao: if cfg_env.handler_cfg.spec_id >= SpecId::MERGE {
-                        Some(header.mix_hash)
-                    } else {
-                        None
-                    },
-                    blob_excess_gas_and_price: header.blob_gas.as_ref().map(
-                        |BlobGas { excess_gas, .. }| {
-                            BlobExcessGasAndPrice::new(
-                                *excess_gas,
-                                cfg_env.handler_cfg.spec_id >= SpecId::PRAGUE,
-                            )
-                        },
-                    ),
-                };
-
-                debug_trace_transaction(
-                    blockchain,
-                    state.clone(),
-                    cfg_env,
-                    trace_config,
-                    block_env,
-                    transactions,
-                    transaction_hash,
-                    verbose_tracing,
-                )
-                .map_err(ProviderError::DebugTrace)
-            },
-        )?
-    }
-
-    pub fn debug_trace_call(
-        &mut self,
-        transaction: transaction::Signed,
-        block_spec: &BlockSpec,
-        trace_config: DebugTraceConfig,
-    ) -> Result<DebugTraceResultWithTraces, ProviderError<LoggerErrorT>> {
-        let cfg_env = self.create_evm_config_at_block_spec(block_spec)?;
-
-        let tx_env: TxEnv = transaction.into();
-
-        let mut tracer = Eip3155AndRawTracers::new(trace_config, self.verbose_tracing);
-        let precompiles = self.custom_precompiles.clone();
-
-        self.execute_in_block_context(Some(block_spec), |blockchain, block, state| {
-            let result = run_call(RunCallArgs {
-                blockchain,
-                header: block.header(),
-                state,
-                state_overrides: &StateOverrides::default(),
-                cfg_env: cfg_env.clone(),
-                tx_env: tx_env.clone(),
-                precompiles: &precompiles,
-                debug_context: Some(DebugContext {
-                    data: &mut tracer,
-                    register_handles_fn: register_eip_3155_and_raw_tracers_handles,
-                }),
-            })?;
-
-            Ok(execution_result_to_debug_result(result, tracer))
-        })?
-    }
-
-    /// Estimate the gas cost of a transaction. Matches Hardhat behavior.
-    pub fn estimate_gas(
-        &mut self,
-        transaction: transaction::Signed,
-        block_spec: &BlockSpec,
-    ) -> Result<EstimateGasResult, ProviderError<LoggerErrorT>> {
-        let cfg_env = self.create_evm_config_at_block_spec(block_spec)?;
-        // Minimum gas cost that is required for transaction to be included in
-        // a block
-        let minimum_cost = transaction::initial_cost(&transaction, self.spec_id());
-        let tx_env: TxEnv = transaction.into();
-
-        let state_overrides = StateOverrides::default();
-
-        let mut debugger = Debugger::with_mocker(
-            Mocker::new(self.call_override.clone()),
-            self.verbose_tracing,
-        );
-
-        let precompiles = self.custom_precompiles.clone();
-        self.execute_in_block_context(Some(block_spec), |blockchain, block, state| {
-            let header = block.header();
-
-            // Measure the gas used by the transaction with optional limit from call request
-            // defaulting to block limit. Report errors from initial call as if from
-            // `eth_call`.
-            let result = call::run_call(RunCallArgs {
-                blockchain,
-                header,
-                state,
-                state_overrides: &state_overrides,
-                cfg_env: cfg_env.clone(),
-                tx_env: tx_env.clone(),
-                precompiles: &precompiles,
-                debug_context: Some(DebugContext {
-                    data: &mut debugger,
-                    register_handles_fn: register_debugger_handles,
-                }),
-            })?;
-
-            let Debugger {
-                console_logger,
-                mut trace_collector,
-                ..
-            } = debugger;
-
-            let mut initial_estimation = match result {
-                ExecutionResult::Success { gas_used, .. } => Ok(gas_used),
-                ExecutionResult::Revert { output, .. } => Err(TransactionFailure::revert(
-                    output,
-                    None,
-                    trace_collector
-                        .traces()
-                        .first()
-                        .expect("Must have a trace")
-                        .clone(),
-                )),
-                ExecutionResult::Halt { reason, .. } => Err(TransactionFailure::halt(
-                    reason,
-                    None,
-                    trace_collector
-                        .traces()
-                        .first()
-                        .expect("Must have a trace")
-                        .clone(),
-                )),
-            }
-            .map_err(|failure| EstimateGasFailure {
-                console_log_inputs: console_logger.into_encoded_messages(),
-                transaction_failure: TransactionFailureWithTraces {
-                    traces: vec![failure.solidity_trace.clone()],
-                    failure,
-                },
-            })?;
-
-            // Ensure that the initial estimation is at least the minimum cost + 1.
-            if initial_estimation <= minimum_cost {
-                initial_estimation = minimum_cost + 1;
-            }
-
-            // Test if the transaction would be successful with the initial estimation
-            let success = gas::check_gas_limit(CheckGasLimitArgs {
-                blockchain,
-                header,
-                state,
-                state_overrides: &state_overrides,
-                cfg_env: cfg_env.clone(),
-                tx_env: tx_env.clone(),
-                gas_limit: initial_estimation,
-                precompiles: &precompiles,
-                trace_collector: &mut trace_collector,
-            })?;
-
-            // Return the initial estimation if it was successful
-            if success {
-                return Ok(EstimateGasResult {
-                    estimation: initial_estimation,
-                    traces: trace_collector.into_traces(),
-                });
-            }
-
-            // Correct the initial estimation if the transaction failed with the actually
-            // used gas limit. This can happen if the execution logic is based
-            // on the available gas.
-            let estimation = gas::binary_search_estimation(BinarySearchEstimationArgs {
-                blockchain,
-                header,
-                state,
-                state_overrides: &state_overrides,
-                cfg_env: cfg_env.clone(),
-                tx_env: tx_env.clone(),
-                lower_bound: initial_estimation,
-                upper_bound: header.gas_limit,
-                precompiles: &precompiles,
-                trace_collector: &mut trace_collector,
-            })?;
-
-            let traces = trace_collector.into_traces();
-            Ok(EstimateGasResult { estimation, traces })
-        })?
-    }
-
-    // Matches Hardhat implementation
-    pub fn fee_history(
-        &mut self,
-        block_count: u64,
-        newest_block_spec: &BlockSpec,
-        percentiles: Option<Vec<RewardPercentile>>,
-    ) -> Result<FeeHistoryResult, ProviderError<LoggerErrorT>> {
-        if self.spec_id() < SpecId::LONDON {
-            return Err(ProviderError::UnmetHardfork {
-                actual: self.spec_id(),
-                minimum: SpecId::LONDON,
-            });
-        }
-
-        let latest_block_number = self.last_block_number();
-        let pending_block_number = latest_block_number + 1;
-        let newest_block_number = self
-            .block_by_block_spec(newest_block_spec)?
-            // None if pending block
-            .map_or(pending_block_number, |block| block.header().number);
-        let oldest_block_number = if newest_block_number < block_count {
-            0
-        } else {
-            newest_block_number - block_count + 1
-        };
-        let last_block_number = newest_block_number + 1;
-
-        let pending_block = if last_block_number >= pending_block_number {
-            let DebugMineBlockResultAndState { block, .. } = self.mine_pending_block()?;
-            Some(block)
-        } else {
-            None
-        };
-
-        let mut result = FeeHistoryResult::new(oldest_block_number);
-
-        let mut reward_and_percentile = percentiles.and_then(|percentiles| {
-            if percentiles.is_empty() {
-                None
-            } else {
-                Some((Vec::default(), percentiles))
-            }
-        });
-
-        let range_includes_remote_blocks = self.fork_metadata.as_ref().map_or(false, |metadata| {
-            oldest_block_number <= metadata.fork_block_number
-        });
-
-        if range_includes_remote_blocks {
-            let last_remote_block = cmp::min(
-                self.fork_metadata
-                    .as_ref()
-                    .expect("we checked that there is a fork")
-                    .fork_block_number,
-                last_block_number,
-            );
-            let remote_block_count = last_remote_block - oldest_block_number + 1;
-
-            let rpc_client = self
-                .rpc_client
-                .as_ref()
-                .expect("we checked that there is a fork");
-            let FeeHistoryResult {
-                oldest_block: _,
-                base_fee_per_gas,
-                gas_used_ratio,
-                reward: remote_reward,
-            } = tokio::task::block_in_place(|| {
-                self.runtime_handle.block_on(
-                    rpc_client.fee_history(
-                        remote_block_count,
-                        newest_block_spec.clone(),
-                        reward_and_percentile
-                            .as_ref()
-                            .map(|(_, percentiles)| percentiles.clone()),
-                    ),
-                )
-            })?;
-
-            result.base_fee_per_gas = base_fee_per_gas;
-            result.gas_used_ratio = gas_used_ratio;
-            if let Some((ref mut reward, _)) = reward_and_percentile.as_mut() {
-                if let Some(remote_reward) = remote_reward {
-                    *reward = remote_reward;
-                }
-            }
-        }
-
-        let first_local_block = if range_includes_remote_blocks {
-            cmp::min(
-                self.fork_metadata
-                    .as_ref()
-                    .expect("we checked that there is a fork")
-                    .fork_block_number,
-                last_block_number,
-            ) + 1
-        } else {
-            oldest_block_number
-        };
-
-        for block_number in first_local_block..=last_block_number {
-            if block_number < pending_block_number {
-                let block = self
-                    .blockchain
-                    .block_by_number(block_number)?
-                    .expect("Block must exist as i is at most the last block number");
-
-                let header = block.header();
-                result
-                    .base_fee_per_gas
-                    .push(header.base_fee_per_gas.unwrap_or(U256::ZERO));
-
-                if block_number < last_block_number {
-                    result
-                        .gas_used_ratio
-                        .push(gas_used_ratio(header.gas_used, header.gas_limit));
-
-                    if let Some((ref mut reward, percentiles)) = reward_and_percentile.as_mut() {
-                        reward.push(compute_rewards(&block, percentiles)?);
-                    }
-                }
-            } else if block_number == pending_block_number {
-                let next_block_base_fee_per_gas = self
-                    .next_block_base_fee_per_gas()?
-                    .expect("We checked that EIP-1559 is active");
-                result.base_fee_per_gas.push(next_block_base_fee_per_gas);
-
-                if block_number < last_block_number {
-                    let block = pending_block.as_ref().expect("We mined the pending block");
-                    let header = block.header();
-                    result
-                        .gas_used_ratio
-                        .push(gas_used_ratio(header.gas_used, header.gas_limit));
-
-                    if let Some((ref mut reward, percentiles)) = reward_and_percentile.as_mut() {
-                        // We don't compute this for the pending block, as there's no
-                        // effective miner fee yet.
-                        reward.push(percentiles.iter().map(|_| U256::ZERO).collect());
-                    }
-                }
-            } else if block_number == pending_block_number + 1 {
-                let block = pending_block.as_ref().expect("We mined the pending block");
-                result
-                    .base_fee_per_gas
-                    .push(calculate_next_base_fee_per_gas(block.header()));
-            }
-        }
-
-        if let Some((reward, _)) = reward_and_percentile {
-            result.reward = Some(reward);
-        }
-
-        Ok(result)
-    }
-
-    pub fn gas_price(&self) -> Result<U256, ProviderError<LoggerErrorT>> {
-        const PRE_EIP_1559_GAS_PRICE: u64 = 8_000_000_000;
-        const SUGGESTED_PRIORITY_FEE_PER_GAS: u64 = 1_000_000_000;
-
-        if let Some(next_block_gas_fee_per_gas) = self.next_block_base_fee_per_gas()? {
-            Ok(next_block_gas_fee_per_gas + U256::from(SUGGESTED_PRIORITY_FEE_PER_GAS))
-        } else {
-            // We return a hardcoded value for networks without EIP-1559
-            Ok(U256::from(PRE_EIP_1559_GAS_PRICE))
-        }
-    }
-
-    pub fn get_code(
-        &mut self,
-        address: Address,
-        block_spec: Option<&BlockSpec>,
-    ) -> Result<Bytes, ProviderError<LoggerErrorT>> {
-        self.execute_in_block_context(block_spec, move |_blockchain, _block, state| {
-            let code = state
-                .basic(address)?
-                .map_or(Ok(Bytes::new()), |account_info| {
-                    state.code_by_hash(account_info.code_hash).map(|bytecode| {
-                        // The `Bytecode` REVM struct pad the bytecode with 33 bytes of 0s for the
-                        // `Checked` and `Analysed` variants. `Bytecode::original_bytes` returns
-                        // unpadded version.
-                        bytecode.original_bytes()
-                    })
-                })?;
-
-            Ok(code)
-        })?
-    }
-
     pub fn get_filter_changes(&mut self, filter_id: &U256) -> Option<FilteredEvents> {
         self.filters.get_mut(filter_id).map(Filter::take_events)
     }
 
-    pub fn get_filter_logs(
-        &mut self,
-        filter_id: &U256,
-    ) -> Result<Option<Vec<LogOutput>>, ProviderError<LoggerErrorT>> {
-        self.filters
-            .get_mut(filter_id)
-            .map(|filter| {
-                if let Some(events) = filter.take_log_events() {
-                    Ok(events)
-                } else {
-                    Err(ProviderError::InvalidFilterSubscriptionType {
-                        filter_id: *filter_id,
-                        expected: SubscriptionType::Logs,
-                        actual: filter.data.subscription_type(),
-                    })
-                }
-            })
-            .transpose()
-    }
-
-    pub fn get_storage_at(
-        &mut self,
-        address: Address,
-        index: U256,
-        block_spec: Option<&BlockSpec>,
-    ) -> Result<U256, ProviderError<LoggerErrorT>> {
-        self.execute_in_block_context::<Result<U256, ProviderError<LoggerErrorT>>>(
-            block_spec,
-            move |_blockchain, _block, state| Ok(state.storage(address, index)?),
-        )?
-    }
-
-    pub fn get_transaction_count(
-        &mut self,
-        address: Address,
-        block_spec: Option<&BlockSpec>,
-    ) -> Result<u64, ProviderError<LoggerErrorT>> {
-        self.execute_in_block_context::<Result<u64, ProviderError<LoggerErrorT>>>(
-            block_spec,
-            move |_blockchain, _block, state| {
-                let nonce = state
-                    .basic(address)?
-                    .map_or(0, |account_info| account_info.nonce);
-
-                Ok(nonce)
-            },
-        )?
-    }
-
     pub fn impersonate_account(&mut self, address: Address) {
         self.impersonated_accounts.insert(address);
+    }
+
+    pub fn include_call_traces(&self) -> IncludeTraces {
+        self.observability.include_call_traces
     }
 
     pub fn increase_block_time(&mut self, increment: u64) -> i64 {
@@ -1085,295 +376,26 @@ impl<LoggerErrorT: Debug, TimerT: Clone + TimeSinceEpoch> ProviderData<LoggerErr
         &self.instance_id
     }
 
-    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
-    pub fn interval_mine(&mut self) -> Result<bool, ProviderError<LoggerErrorT>> {
-        let result = self.mine_and_commit_block(BlockOptions::default())?;
-
-        self.logger
-            .log_interval_mined(self.spec_id(), &result)
-            .map_err(ProviderError::Logger)?;
-
-        Ok(true)
+    /// Returns whether the miner is mining automatically.
+    pub fn is_auto_mining(&self) -> bool {
+        self.is_auto_mining
     }
 
-    pub fn logger_mut(
-        &mut self,
-    ) -> &mut dyn SyncLogger<BlockchainError = BlockchainError, LoggerError = LoggerErrorT> {
+    pub fn logger_mut(&mut self) -> &mut dyn SyncLogger<ChainSpecT, TimerT> {
         &mut *self.logger
     }
 
-    pub fn logs(&self, filter: LogFilter) -> Result<Vec<FilterLog>, ProviderError<LoggerErrorT>> {
-        self.blockchain
-            .logs(
-                filter.from_block,
-                filter
-                    .to_block
-                    .unwrap_or(self.blockchain.last_block_number()),
-                &filter.addresses,
-                &filter.normalized_topics,
-            )
-            .map_err(ProviderError::Blockchain)
+    /// Returns the instance's [`MiningConfig`].
+    pub fn mining_config(&self) -> &MiningConfig {
+        &self.mining_config
     }
 
-    pub fn make_snapshot(&mut self) -> u64 {
-        let id = self.next_snapshot_id;
-        self.next_snapshot_id += 1;
-
-        let snapshot = Snapshot {
-            block_number: self.blockchain.last_block_number(),
-            block_number_to_state_id: self.block_number_to_state_id.clone(),
-            block_time_offset_seconds: self.block_time_offset_seconds,
-            coinbase: self.beneficiary,
-            irregular_state: self.irregular_state.clone(),
-            mem_pool: self.mem_pool.clone(),
-            next_block_base_fee_per_gas: self.next_block_base_fee_per_gas,
-            next_block_timestamp: self.next_block_timestamp,
-            parent_beacon_block_root_generator: self.parent_beacon_block_root_generator.clone(),
-            prev_randao_generator: self.prev_randao_generator.clone(),
-            time: Instant::now(),
-        };
-        self.snapshots.insert(id, snapshot);
-
-        id
-    }
-
-    /// Mines a block with the provided options, using transactions in the
-    /// mempool, and commits it to the blockchain.
-    pub fn mine_and_commit_block(
-        &mut self,
-        options: BlockOptions,
-    ) -> Result<DebugMineBlockResult<BlockchainError>, ProviderError<LoggerErrorT>> {
-        self.mine_and_commit_block_impl(Self::mine_block_with_mem_pool, options)
-    }
-
-    fn mine_and_commit_block_impl(
-        &mut self,
-        mine_fn: impl FnOnce(
-            &mut ProviderData<LoggerErrorT, TimerT>,
-            &CfgEnvWithHandlerCfg,
-            BlockOptions,
-            &mut Debugger,
-        ) -> Result<
-            MineBlockResultAndState<L1ChainSpec, StateError>,
-            ProviderError<LoggerErrorT>,
-        >,
-        mut options: BlockOptions,
-    ) -> Result<DebugMineBlockResult<BlockchainError>, ProviderError<LoggerErrorT>> {
-        let (block_timestamp, new_offset) = self.next_block_timestamp(options.timestamp)?;
-        options.timestamp = Some(block_timestamp);
-
-        let result = self.mine_block(mine_fn, options)?;
-
-        let block_and_total_difficulty = self
-            .blockchain
-            .insert_block(result.block, result.state_diff)
-            .map_err(ProviderError::Blockchain)?;
-
-        self.mem_pool
-            .update(&result.state)
-            .map_err(ProviderError::MemPoolUpdate)?;
-
-        if let Some(new_offset) = new_offset {
-            self.block_time_offset_seconds = new_offset;
-        }
-
-        // Reset the next block base fee per gas upon successful execution
-        self.next_block_base_fee_per_gas.take();
-
-        // Reset next block time stamp
-        self.next_block_timestamp.take();
-
-        self.parent_beacon_block_root_generator.generate_next();
-        self.prev_randao_generator.generate_next();
-
-        self.notify_subscribers_about_mined_block(&block_and_total_difficulty)?;
-
-        self.add_state_to_cache(
-            result.state,
-            block_and_total_difficulty.block.header().number,
-        );
-
-        Ok(DebugMineBlockResult {
-            block: block_and_total_difficulty.block,
-            transaction_results: result.transaction_results,
-            transaction_traces: result.transaction_traces,
-            console_log_inputs: result.console_log_inputs,
-        })
-    }
-
-    /// Mines `number_of_blocks` blocks with the provided `interval` between
-    /// them.
-    pub fn mine_and_commit_blocks(
-        &mut self,
-        number_of_blocks: u64,
-        interval: u64,
-    ) -> Result<Vec<DebugMineBlockResult<BlockchainError>>, ProviderError<LoggerErrorT>> {
-        // There should be at least 2 blocks left for the reservation to work,
-        // because we always mine a block after it. But here we use a bigger
-        // number to err on the side of safety.
-        const MINIMUM_RESERVABLE_BLOCKS: u64 = 6;
-
-        if number_of_blocks == 0 {
-            return Ok(Vec::new());
-        }
-
-        let mine_block_with_interval =
-            |data: &mut ProviderData<LoggerErrorT, TimerT>,
-             mined_blocks: &mut Vec<DebugMineBlockResult<BlockchainError>>|
-             -> Result<(), ProviderError<LoggerErrorT>> {
-                let previous_timestamp = mined_blocks
-                    .last()
-                    .expect("at least one block was mined")
-                    .block
-                    .header()
-                    .timestamp;
-
-                let options = BlockOptions {
-                    timestamp: Some(previous_timestamp + interval),
-                    ..BlockOptions::default()
-                };
-
-                let mined_block = data.mine_and_commit_block(options)?;
-                mined_blocks.push(mined_block);
-
-                Ok(())
-            };
-
-        // Limit the pre-allocated capacity based on the minimum reservable number of
-        // blocks to avoid too large allocations.
-        let mut mined_blocks = Vec::with_capacity(
-            usize::try_from(number_of_blocks.min(2 * MINIMUM_RESERVABLE_BLOCKS))
-                .expect("number of blocks exceeds {u64::MAX}"),
-        );
-
-        // we always mine the first block, and we don't apply the interval for it
-        mined_blocks.push(self.mine_and_commit_block(BlockOptions::default())?);
-
-        while u64::try_from(mined_blocks.len()).expect("usize cannot be larger than u128")
-            < number_of_blocks
-            && self.mem_pool.has_pending_transactions()
-        {
-            mine_block_with_interval(self, &mut mined_blocks)?;
-        }
-
-        // If there is at least one remaining block, we mine one. This way, we
-        // guarantee that there's an empty block immediately before and after the
-        // reservation. This makes the logging easier to get right.
-        if u64::try_from(mined_blocks.len()).expect("usize cannot be larger than u128")
-            < number_of_blocks
-        {
-            mine_block_with_interval(self, &mut mined_blocks)?;
-        }
-
-        let remaining_blocks = number_of_blocks
-            - u64::try_from(mined_blocks.len()).expect("usize cannot be larger than u128");
-
-        if remaining_blocks < MINIMUM_RESERVABLE_BLOCKS {
-            for _ in 0..remaining_blocks {
-                mine_block_with_interval(self, &mut mined_blocks)?;
-            }
-        } else {
-            let current_state = (*self.current_state()?).clone();
-
-            self.blockchain
-                .reserve_blocks(remaining_blocks - 1, interval)?;
-
-            // Ensure there is a cache entry for the last reserved block, to avoid
-            // recomputation
-            self.add_state_to_cache(current_state, self.last_block_number());
-
-            let previous_timestamp = self.blockchain.last_block()?.header().timestamp;
-            let options = BlockOptions {
-                timestamp: Some(previous_timestamp + interval),
-                ..BlockOptions::default()
-            };
-
-            let mined_block = self.mine_and_commit_block(options)?;
-            mined_blocks.push(mined_block);
-        }
-
-        mined_blocks.shrink_to_fit();
-
-        Ok(mined_blocks)
-    }
-
+    /// Returns the instance's network ID.
     pub fn network_id(&self) -> String {
-        self.initial_config.network_id.to_string()
+        self.network_id.to_string()
     }
 
-    /// Calculates the next block's base fee per gas.
-    pub fn next_block_base_fee_per_gas(&self) -> Result<Option<U256>, BlockchainError> {
-        if self.spec_id() < SpecId::LONDON {
-            return Ok(None);
-        }
-
-        self.next_block_base_fee_per_gas
-            .map_or_else(
-                || {
-                    let last_block = self.last_block()?;
-
-                    let base_fee = calculate_next_base_fee_per_gas(last_block.header());
-
-                    Ok(base_fee)
-                },
-                Ok,
-            )
-            .map(Some)
-    }
-
-    /// Calculates the next block's base fee per blob gas.
-    pub fn next_block_base_fee_per_blob_gas(&self) -> Result<Option<U256>, BlockchainError> {
-        if self.spec_id() < SpecId::CANCUN {
-            return Ok(None);
-        }
-
-        let last_block = self.last_block()?;
-        let base_fee = calculate_next_base_fee_per_blob_gas(last_block.header(), self.spec_id());
-
-        Ok(Some(U256::from(base_fee)))
-    }
-
-    /// Calculates the gas price for the next block.
-    pub fn next_gas_price(&self) -> Result<U256, BlockchainError> {
-        if let Some(next_block_base_fee_per_gas) = self.next_block_base_fee_per_gas()? {
-            let suggested_priority_fee_per_gas = U256::from(1_000_000_000u64);
-            Ok(next_block_base_fee_per_gas + suggested_priority_fee_per_gas)
-        } else {
-            // We return a hardcoded value for networks without EIP-1559
-            Ok(U256::from(8_000_000_000u64))
-        }
-    }
-
-    pub fn nonce(
-        &mut self,
-        address: &Address,
-        block_spec: Option<&BlockSpec>,
-        state_overrides: &StateOverrides,
-    ) -> Result<u64, ProviderError<LoggerErrorT>> {
-        state_overrides
-            .account_override(address)
-            .and_then(|account_override| account_override.nonce)
-            .map_or_else(
-                || {
-                    if matches!(block_spec, Some(BlockSpec::Tag(BlockTag::Pending))) {
-                        self.account_next_nonce(address)
-                    } else {
-                        self.execute_in_block_context(
-                            block_spec,
-                            move |_blockchain, _block, state| {
-                                let nonce =
-                                    state.basic(*address)?.map_or(0, |account| account.nonce);
-
-                                Ok(nonce)
-                            },
-                        )?
-                    }
-                },
-                Ok,
-            )
-    }
-
-    pub fn pending_transactions(&self) -> impl Iterator<Item = &transaction::Signed> {
+    pub fn pending_transactions(&self) -> impl Iterator<Item = &ChainSpecT::SignedTransaction> {
         self.mem_pool.transactions()
     }
 
@@ -1390,8 +412,178 @@ impl<LoggerErrorT: Debug, TimerT: Clone + TimeSinceEpoch> ProviderData<LoggerErr
     pub fn remove_pending_transaction(
         &mut self,
         transaction_hash: &B256,
-    ) -> Option<OrderedTransaction> {
+    ) -> Option<OrderedTransaction<ChainSpecT::SignedTransaction>> {
         self.mem_pool.remove_transaction(transaction_hash)
+    }
+
+    /// Retrieves the runtime handle.
+    pub fn runtime(&self) -> &runtime::Handle {
+        &self.runtime_handle
+    }
+
+    /// Sets whether the miner should mine automatically.
+    pub fn set_auto_mining(&mut self, enabled: bool) {
+        self.is_auto_mining = enabled;
+    }
+
+    pub fn set_call_override_callback(&mut self, call_override: Option<Arc<dyn SyncCallOverride>>) {
+        self.observability.call_override = call_override;
+    }
+
+    /// Sets the coinbase.
+    pub fn set_coinbase(&mut self, coinbase: Address) {
+        self.beneficiary = coinbase;
+    }
+
+    pub fn set_verbose_tracing(&mut self, verbose_tracing: bool) {
+        self.observability.verbose_raw_tracing = verbose_tracing;
+    }
+
+    pub fn stop_impersonating_account(&mut self, address: Address) -> bool {
+        self.impersonated_accounts.remove(&address)
+    }
+
+    /// Returns the transaction gas cap, if set.
+    pub fn transaction_gas_cap(&self) -> Option<u64> {
+        self.mem_pool.transaction_gas_cap()
+    }
+
+    fn add_state_to_cache(&mut self, state: Box<dyn DynState>, block_number: u64) -> StateId {
+        let state_id = self.current_state_id.increment();
+        self.block_state_cache.push(state_id, Arc::new(state));
+        self.block_number_to_state_id
+            .insert_mut(block_number, state_id);
+        state_id
+    }
+
+    fn next_filter_id(&mut self) -> U256 {
+        self.last_filter_id = self
+            .last_filter_id
+            .checked_add(U256::from(1))
+            .expect("filter id starts at zero, so it'll never overflow for U256");
+        self.last_filter_id
+    }
+
+    /// Notifies subscribers to `FilterData::NewPendingTransactions` about the
+    /// pending transaction with the provided hash.
+    fn notify_subscribers_about_pending_transaction(&mut self, transaction_hash: &B256) {
+        for (filter_id, filter) in self.filters.iter_mut() {
+            if let FilterData::NewPendingTransactions(events) = &mut filter.data {
+                if filter.is_subscription {
+                    (self.subscriber_callback)(SubscriptionEvent {
+                        filter_id: *filter_id,
+                        result: SubscriptionEventData::NewPendingTransactions(*transaction_hash),
+                    });
+                } else {
+                    events.push(*transaction_hash);
+                }
+            }
+        }
+    }
+
+    /// Notifies subscribers to `FilterData::Logs` and `FilterData::NewHeads`
+    /// about the mined block.
+    fn notify_subscribers_about_mined_block(
+        &mut self,
+        block_and_total_difficulty: &BlockAndTotalDifficulty<
+            Arc<ChainSpecT::Block>,
+            ChainSpecT::SignedTransaction,
+        >,
+    ) -> Result<(), ProviderErrorForChainSpec<ChainSpecT>> {
+        let block = &block_and_total_difficulty.block;
+        for (filter_id, filter) in self.filters.iter_mut() {
+            match &mut filter.data {
+                FilterData::Logs { criteria, logs } => {
+                    let bloom = &block.block_header().logs_bloom;
+                    if bloom_contains_log_filter(bloom, criteria) {
+                        let receipts = block
+                            .fetch_transaction_receipts()
+                            .map_err(ProviderError::FetchReceipt)?;
+                        let new_logs = receipts.iter().flat_map(ExecutionReceipt::transaction_logs);
+
+                        let mut filtered_logs = filter_logs(new_logs, criteria);
+                        if filter.is_subscription {
+                            (self.subscriber_callback)(SubscriptionEvent {
+                                filter_id: *filter_id,
+                                result: SubscriptionEventData::Logs(filtered_logs.clone()),
+                            });
+                        } else {
+                            logs.append(&mut filtered_logs);
+                        }
+                    }
+                }
+                FilterData::NewHeads(block_hashes) => {
+                    if filter.is_subscription {
+                        (self.subscriber_callback)(SubscriptionEvent {
+                            filter_id: *filter_id,
+                            result: SubscriptionEventData::NewHeads(
+                                block_and_total_difficulty.clone(),
+                            ),
+                        });
+                    } else {
+                        block_hashes.push(*block.block_hash());
+                    }
+                }
+                FilterData::NewPendingTransactions(_) => (),
+            }
+        }
+
+        // Remove outdated filters
+        self.filters.retain(|_, filter| !filter.has_expired());
+
+        Ok(())
+    }
+
+    fn remove_filter_impl<const IS_SUBSCRIPTION: bool>(&mut self, filter_id: &U256) -> bool {
+        if let Some(filter) = self.filters.get(filter_id) {
+            filter.is_subscription == IS_SUBSCRIPTION && self.filters.remove(filter_id).is_some()
+        } else {
+            false
+        }
+    }
+
+    fn header_overrides_with_timestamp(
+        &self,
+        timestamp: u64,
+    ) -> HeaderOverrides<ChainSpecT::Hardfork> {
+        HeaderOverrides {
+            timestamp: Some(timestamp),
+            base_fee_params: self.base_fee_params.clone(),
+            ..HeaderOverrides::default()
+        }
+    }
+
+    fn header_overrides(&self) -> HeaderOverrides<ChainSpecT::Hardfork> {
+        HeaderOverrides {
+            base_fee_params: self.base_fee_params.clone(),
+            ..HeaderOverrides::default()
+        }
+    }
+}
+
+impl<ChainSpecT, TimerT> ProviderData<ChainSpecT, TimerT>
+where
+    ChainSpecT: ProviderSpec<TimerT>,
+    TimerT: Clone + TimeSinceEpoch,
+{
+    pub fn get_filter_logs(
+        &mut self,
+        filter_id: &U256,
+    ) -> Result<Option<Vec<LogOutput>>, ProviderErrorForChainSpec<ChainSpecT>> {
+        self.filters
+            .get_mut(filter_id)
+            .map(|filter| {
+                if let Some(events) = filter.take_log_events() {
+                    Ok(events)
+                } else {
+                    Err(ProviderError::InvalidFilterSubscriptionType {
+                        filter_id: *filter_id,
+                        expected: SubscriptionType::Logs,
+                        actual: filter.data.subscription_type(),
+                    })
+                }
+            })
+            .transpose()
     }
 
     pub fn revert_to_snapshot(&mut self, snapshot_id: u64) -> bool {
@@ -1440,180 +632,359 @@ impl<LoggerErrorT: Debug, TimerT: Clone + TimeSinceEpoch> ProviderData<LoggerErr
         }
     }
 
-    pub fn run_call(
-        &mut self,
-        transaction: transaction::Signed,
-        block_spec: &BlockSpec,
-        state_overrides: &StateOverrides,
-    ) -> Result<CallResult, ProviderError<LoggerErrorT>> {
-        let cfg_env = self.create_evm_config_at_block_spec(block_spec)?;
-        let tx_env = transaction.into();
-
-        let mut debugger = Debugger::with_mocker(
-            Mocker::new(self.call_override.clone()),
-            self.verbose_tracing,
-        );
-
-        let precompiles = self.custom_precompiles.clone();
-        self.execute_in_block_context(Some(block_spec), |blockchain, block, state| {
-            let execution_result = call::run_call(RunCallArgs {
-                blockchain,
-                header: block.header(),
-                state,
-                state_overrides,
-                cfg_env,
-                tx_env,
-                precompiles: &precompiles,
-                debug_context: Some(DebugContext {
-                    data: &mut debugger,
-                    register_handles_fn: register_debugger_handles,
-                }),
-            })?;
-
-            let Debugger {
-                console_logger,
-                trace_collector,
-                ..
-            } = debugger;
-
-            let mut traces = trace_collector.into_traces();
-            // Should only have a single raw trace
-            assert_eq!(traces.len(), 1);
-
-            Ok(CallResult {
-                console_log_inputs: console_logger.into_encoded_messages(),
-                execution_result,
-                trace: traces.pop().expect("Must have a trace"),
-            })
-        })?
+    fn scheduled_blob_params(&self) -> Option<&ScheduledBlobParams> {
+        self.block_config.scheduled_blob_params.as_ref()
     }
-
-    pub fn transaction_receipt(
+    pub fn sign(
         &self,
-        transaction_hash: &B256,
-    ) -> Result<Option<Arc<BlockReceipt>>, ProviderError<LoggerErrorT>> {
-        self.blockchain
-            .receipt_by_transaction_hash(transaction_hash)
-            .map_err(ProviderError::Blockchain)
-    }
-
-    pub fn set_min_gas_price(
-        &mut self,
-        min_gas_price: U256,
-    ) -> Result<(), ProviderError<LoggerErrorT>> {
-        if self.spec_id() >= SpecId::LONDON {
-            return Err(ProviderError::SetMinGasPriceUnsupported);
+        address: &Address,
+        message: Bytes,
+    ) -> Result<SignatureWithRecoveryId, ProviderErrorForChainSpec<ChainSpecT>> {
+        match self.local_accounts.get(address) {
+            Some(secret_key) => Ok(SignatureWithRecoveryId::new(&message[..], secret_key)?),
+            None => Err(ProviderError::UnknownAddress { address: *address }),
         }
-
-        self.min_gas_price = min_gas_price;
-
-        Ok(())
     }
 
-    pub fn set_verbose_tracing(&mut self, verbose_tracing: bool) {
-        self.verbose_tracing = verbose_tracing;
-    }
-
-    pub fn send_transaction(
-        &mut self,
-        transaction: transaction::Signed,
-    ) -> Result<SendTransactionResult, ProviderError<LoggerErrorT>> {
-        if transaction.transaction_type() == TransactionType::Eip4844 {
-            if !self.is_auto_mining || mempool::has_transactions(&self.mem_pool) {
-                return Err(ProviderError::BlobMemPoolUnsupported);
+    pub fn sign_typed_data_v4(
+        &self,
+        address: &Address,
+        message: &TypedData,
+    ) -> Result<SignatureWithRecoveryId, ProviderErrorForChainSpec<ChainSpecT>> {
+        match self.local_accounts.get(address) {
+            Some(secret_key) => {
+                let hash = message.eip712_signing_hash()?;
+                Ok(SignatureWithRecoveryId::new(
+                    RecoveryMessage::Hash(hash),
+                    secret_key,
+                )?)
             }
-
-            let transaction_hash = *transaction.transaction_hash();
-
-            // Despite not adding the transaction to the mempool, we still notify
-            // subscribers
-            self.notify_subscribers_about_pending_transaction(&transaction_hash);
-
-            let result = self.mine_and_commit_block_impl(
-                move |provider, config, options, debugger| {
-                    provider.mine_block_with_single_transaction(
-                        config,
-                        options,
-                        transaction,
-                        debugger,
-                    )
-                },
-                BlockOptions::default(),
-            )?;
-
-            return Ok(SendTransactionResult {
-                transaction_hash,
-                mining_results: vec![result],
-            });
+            None => Err(ProviderError::UnknownAddress { address: *address }),
         }
+    }
+}
 
-        let snapshot_id = if self.is_auto_mining {
-            self.validate_auto_mine_transaction(&transaction)?;
+impl<ChainSpecT, TimerT> ProviderData<ChainSpecT, TimerT>
+where
+    ChainSpecT: SyncProviderSpec<TimerT>,
+    TimerT: Clone + TimeSinceEpoch,
+{
+    pub fn new(
+        runtime_handle: runtime::Handle,
+        logger: Box<dyn SyncLogger<ChainSpecT, TimerT>>,
+        subscriber_callback: Box<
+            dyn SyncSubscriberCallback<ChainSpecT::Block, ChainSpecT::SignedTransaction>,
+        >,
+        config: ProviderConfig<ChainSpecT::Hardfork>,
+        contract_decoder: Arc<RwLock<ContractDecoder>>,
+        timer: TimerT,
+    ) -> Result<Self, CreationErrorForChainSpec<ChainSpecT>> {
+        let BlockchainAndState {
+            blockchain,
+            block_config,
+            fork_metadata,
+            rpc_client,
+            state,
+            irregular_state,
+            prev_randao_generator,
+            block_time_offset_seconds,
+            next_block_base_fee_per_gas,
+        } = create_blockchain_and_state(runtime_handle.clone(), &config, &timer)?;
 
-            Some(self.make_snapshot())
+        let max_cached_states = get_max_cached_states_from_env::<ChainSpecT, TimerT>()?;
+        let mut block_state_cache = LruCache::new(max_cached_states);
+        let mut block_number_to_state_id = HashTrieMapSync::default();
+
+        let current_state_id = StateId::default();
+        block_state_cache.push(current_state_id, Arc::new(state));
+        block_number_to_state_id.insert_mut(blockchain.last_block_number(), current_state_id);
+
+        let allow_blocks_with_same_timestamp = config.allow_blocks_with_same_timestamp;
+        let allow_unlimited_contract_size = config.allow_unlimited_contract_size;
+        let beneficiary = config.coinbase;
+        let block_gas_limit = config.block_gas_limit;
+        let is_auto_mining = config.mining.auto_mine;
+        let min_gas_price = config.min_gas_price;
+
+        let local_accounts = config
+            .owned_accounts
+            .iter()
+            .map(|secret_key| {
+                let address = public_key_to_address(secret_key.public_key());
+
+                (address, secret_key.clone())
+            })
+            .collect();
+
+        let observability = config.observability.clone();
+
+        let skip_unsupported_transaction_types = get_skip_unsupported_transaction_types_from_env();
+
+        let parent_beacon_block_root_generator = if let Some(initial_parent_beacon_block_root) =
+            &config.initial_parent_beacon_block_root
+        {
+            RandomHashGenerator::with_value(*initial_parent_beacon_block_root)
+        } else {
+            RandomHashGenerator::with_seed("randomParentBeaconBlockRootSeed")
+        };
+
+        let transaction_gas_cap = if let Some(cap) = config.transaction_gas_cap {
+            Some(cap)
+        } else if config.hardfork.into() >= EvmSpecId::OSAKA {
+            Some(eip7825::MAX_TX_GAS_LIMIT_OSAKA)
         } else {
             None
         };
 
-        let transaction_hash = self
-            .add_pending_transaction(transaction)
-            .inspect_err(|_error| {
-                if let Some(snapshot_id) = snapshot_id {
-                    self.revert_to_snapshot(snapshot_id);
-                }
-            })?;
-
-        let mut mining_results = Vec::new();
-        snapshot_id
-            .map(|snapshot_id| -> Result<(), ProviderError<LoggerErrorT>> {
-                loop {
-                    let result = self
-                        .mine_and_commit_block(BlockOptions::default())
-                        .inspect_err(|_error| {
-                            self.revert_to_snapshot(snapshot_id);
-                        })?;
-
-                    let mined_transaction = result.has_transaction(&transaction_hash);
-
-                    mining_results.push(result);
-
-                    if mined_transaction {
-                        break;
-                    }
-                }
-
-                while self.mem_pool.has_pending_transactions() {
-                    let result = self
-                        .mine_and_commit_block(BlockOptions::default())
-                        .inspect_err(|_error| {
-                            self.revert_to_snapshot(snapshot_id);
-                        })?;
-
-                    mining_results.push(result);
-                }
-
-                self.snapshots.remove(&snapshot_id);
-
-                Ok(())
-            })
-            .transpose()?;
-
-        Ok(SendTransactionResult {
-            transaction_hash,
-            mining_results,
+        Ok(Self {
+            runtime_handle,
+            bail_on_call_failure: config.bail_on_call_failure,
+            bail_on_transaction_failure: config.bail_on_transaction_failure,
+            base_fee_params: config.base_fee_params,
+            blockchain,
+            block_config,
+            irregular_state,
+            mem_pool: MemPool::new(block_gas_limit, transaction_gas_cap),
+            mining_config: config.mining,
+            network_id: config.network_id,
+            observability,
+            precompile_overrides: config.precompile_overrides,
+            beneficiary,
+            min_gas_price,
+            parent_beacon_block_root_generator,
+            prev_randao_generator,
+            block_time_offset_seconds,
+            fork_metadata,
+            rpc_client,
+            instance_id: B256::random(),
+            is_auto_mining,
+            next_block_base_fee_per_gas,
+            next_block_timestamp: None,
+            // Start with 1 to mimic Ganache
+            next_snapshot_id: 1,
+            snapshots: BTreeMap::new(),
+            allow_blocks_with_same_timestamp,
+            allow_unlimited_contract_size,
+            skip_unsupported_transaction_types,
+            local_accounts,
+            filters: HashMap::default(),
+            last_filter_id: U256::ZERO,
+            logger,
+            impersonated_accounts: HashSet::default(),
+            subscriber_callback,
+            timer,
+            block_state_cache,
+            current_state_id,
+            block_number_to_state_id,
+            contract_decoder,
         })
     }
 
-    /// Sets whether the miner should mine automatically.
-    pub fn set_auto_mining(&mut self, enabled: bool) {
-        self.is_auto_mining = enabled;
+    /// Retrieves the last pending nonce of the account corresponding to the
+    /// provided address, if it exists.
+    pub fn account_next_nonce(
+        &mut self,
+        address: &Address,
+    ) -> Result<u64, ProviderErrorForChainSpec<ChainSpecT>> {
+        let state = self.current_state()?;
+        account_next_nonce(&self.mem_pool, &*state, address).map_err(Into::into)
+    }
+
+    /// Adds a filter for new blocks to the provider.
+    pub fn add_block_filter<const IS_SUBSCRIPTION: bool>(
+        &mut self,
+    ) -> Result<U256, ProviderErrorForChainSpec<ChainSpecT>> {
+        let block_hash = *self.last_block()?.block_hash();
+
+        let filter_id = self.next_filter_id();
+        self.filters.insert(
+            filter_id,
+            Filter::new_block_filter(block_hash, IS_SUBSCRIPTION),
+        );
+
+        Ok(filter_id)
+    }
+
+    /// Adds a filter for new logs to the provider.
+    pub fn add_log_filter<const IS_SUBSCRIPTION: bool>(
+        &mut self,
+        criteria: LogFilter,
+    ) -> Result<U256, ProviderErrorForChainSpec<ChainSpecT>> {
+        let logs = self
+            .blockchain
+            .logs(
+                criteria.from_block,
+                criteria
+                    .to_block
+                    .unwrap_or(self.blockchain.last_block_number()),
+                &criteria.addresses,
+                &criteria.normalized_topics,
+            )?
+            .iter()
+            .map(LogOutput::from)
+            .collect();
+
+        let filter_id = self.next_filter_id();
+        self.filters.insert(
+            filter_id,
+            Filter::new_log_filter(criteria, logs, IS_SUBSCRIPTION),
+        );
+        Ok(filter_id)
+    }
+
+    /// Fetch a block by block spec.
+    /// Returns `None` if the block spec is `pending`.
+    /// Returns `ProviderError::InvalidBlockSpec` error if the block spec is a
+    /// number or a hash and the block isn't found.
+    /// Returns `ProviderError::InvalidBlockTag` error if the block tag is safe
+    /// or finalized and block spec is pre-merge.
+    // `SyncBlock` cannot be simplified further
+    #[allow(clippy::type_complexity)]
+    pub fn block_by_block_spec(
+        &self,
+        block_spec: &BlockSpec,
+    ) -> Result<Option<Arc<ChainSpecT::Block>>, ProviderErrorForChainSpec<ChainSpecT>> {
+        let result = match block_spec {
+            BlockSpec::Number(block_number) => Some(
+                self.blockchain
+                    .block_by_number(*block_number)?
+                    .ok_or_else(|| ProviderError::InvalidBlockNumberOrHash {
+                        block_spec: block_spec.clone(),
+                        latest_block_number: self.blockchain.last_block_number(),
+                    })?,
+            ),
+            BlockSpec::Tag(BlockTag::Earliest) => Some(
+                self.blockchain
+                    .block_by_number(0)?
+                    .expect("genesis block should always exist"),
+            ),
+            // Matching Hardhat behaviour by returning the last block for finalized and safe.
+            // https://github.com/NomicFoundation/hardhat/blob/b84baf2d9f5d3ea897c06e0ecd5e7084780d8b6c/packages/hardhat-core/src/internal/hardhat-network/provider/modules/eth.ts#L1395
+            BlockSpec::Tag(tag @ (BlockTag::Finalized | BlockTag::Safe)) => {
+                if self.evm_spec_id() >= EvmSpecId::MERGE {
+                    Some(self.blockchain.last_block()?)
+                } else {
+                    return Err(ProviderError::InvalidBlockTag {
+                        block_tag: *tag,
+                        hardfork: self.hardfork(),
+                    });
+                }
+            }
+            BlockSpec::Tag(BlockTag::Latest) => Some(self.blockchain.last_block()?),
+            BlockSpec::Tag(BlockTag::Pending) => None,
+            BlockSpec::Eip1898(Eip1898BlockSpec::Hash {
+                block_hash,
+                require_canonical: _,
+            }) => Some(self.blockchain.block_by_hash(block_hash)?.ok_or_else(|| {
+                ProviderError::InvalidBlockNumberOrHash {
+                    block_spec: block_spec.clone(),
+                    latest_block_number: self.blockchain.last_block_number(),
+                }
+            })?),
+            BlockSpec::Eip1898(Eip1898BlockSpec::Number { block_number }) => Some(
+                self.blockchain
+                    .block_by_number(*block_number)?
+                    .ok_or_else(|| ProviderError::InvalidBlockNumberOrHash {
+                        block_spec: block_spec.clone(),
+                        latest_block_number: self.blockchain.last_block_number(),
+                    })?,
+            ),
+        };
+
+        Ok(result)
+    }
+
+    /// Retrieves the block that contains a transaction with the provided hash,
+    /// if it exists.
+    pub fn block_by_transaction_hash(
+        &self,
+        transaction_hash: &B256,
+    ) -> Result<Option<Arc<ChainSpecT::Block>>, ProviderErrorForChainSpec<ChainSpecT>> {
+        self.blockchain
+            .block_by_transaction_hash(transaction_hash)
+            .map_err(ProviderError::Blockchain)
+    }
+
+    // `SyncBlock` cannot be simplified further
+    #[allow(clippy::type_complexity)]
+    pub fn block_by_hash(
+        &self,
+        block_hash: &B256,
+    ) -> Result<Option<Arc<ChainSpecT::Block>>, ProviderErrorForChainSpec<ChainSpecT>> {
+        self.blockchain
+            .block_by_hash(block_hash)
+            .map_err(ProviderError::Blockchain)
+    }
+
+    pub fn gas_price(&self) -> Result<u128, ProviderErrorForChainSpec<ChainSpecT>> {
+        const PRE_EIP_1559_GAS_PRICE: u128 = 8_000_000_000;
+        const SUGGESTED_PRIORITY_FEE_PER_GAS: u128 = 1_000_000_000;
+
+        if let Some(next_block_gas_fee_per_gas) = self.next_block_base_fee_per_gas()? {
+            Ok(next_block_gas_fee_per_gas + SUGGESTED_PRIORITY_FEE_PER_GAS)
+        } else {
+            // We return a hardcoded value for networks without EIP-1559
+            Ok(PRE_EIP_1559_GAS_PRICE)
+        }
+    }
+
+    pub fn logs(
+        &self,
+        filter: LogFilter,
+    ) -> Result<Vec<FilterLog>, ProviderErrorForChainSpec<ChainSpecT>> {
+        self.blockchain
+            .logs(
+                filter.from_block,
+                filter
+                    .to_block
+                    .unwrap_or(self.blockchain.last_block_number()),
+                &filter.addresses,
+                &filter.normalized_topics,
+            )
+            .map_err(ProviderError::Blockchain)
+    }
+
+    pub fn set_account_storage_slot(
+        &mut self,
+        address: Address,
+        index: U256,
+        value: U256,
+    ) -> Result<(), ProviderErrorForChainSpec<ChainSpecT>> {
+        // We clone to automatically revert in case of subsequent errors.
+        let mut modified_state = (*self.current_state()?).clone();
+        let old_value = modified_state.set_account_storage_slot(address, index, value)?;
+
+        let slot = EvmStorageSlot::new_changed(old_value, value, 0);
+        let account_info = modified_state.basic(address).and_then(|mut account_info| {
+            // Retrieve the code if it's not empty. This is needed for the irregular state.
+            if let Some(account_info) = &mut account_info
+                && account_info.code_hash != KECCAK_EMPTY
+            {
+                account_info.code = Some(modified_state.code_by_hash(account_info.code_hash)?);
+            }
+
+            Ok(account_info)
+        })?;
+
+        let state_root = modified_state.state_root()?;
+
+        let block_number = self.blockchain.last_block_number();
+        self.irregular_state
+            .state_override_at_block_number(block_number)
+            .or_insert_with(|| StateOverride::with_state_root(state_root))
+            .diff
+            .apply_storage_change(address, index, slot, account_info);
+
+        self.add_state_to_cache(modified_state, block_number);
+
+        Ok(())
     }
 
     pub fn set_balance(
         &mut self,
         address: Address,
         balance: U256,
-    ) -> Result<(), ProviderError<LoggerErrorT>> {
+    ) -> Result<(), ProviderErrorForChainSpec<ChainSpecT>> {
         let mut modified_state = (*self.current_state()?).clone();
         let account_info = modified_state.modify_account(
             address,
@@ -1642,7 +1013,7 @@ impl<LoggerErrorT: Debug, TimerT: Clone + TimeSinceEpoch> ProviderData<LoggerErr
     pub fn set_block_gas_limit(
         &mut self,
         gas_limit: NonZeroU64,
-    ) -> Result<(), ProviderError<LoggerErrorT>> {
+    ) -> Result<(), ProviderErrorForChainSpec<ChainSpecT>> {
         let state = self.current_state()?;
         self.mem_pool
             .set_block_gas_limit(&*state, gas_limit)
@@ -1653,7 +1024,7 @@ impl<LoggerErrorT: Debug, TimerT: Clone + TimeSinceEpoch> ProviderData<LoggerErr
         &mut self,
         address: Address,
         code: Bytes,
-    ) -> Result<(), ProviderError<LoggerErrorT>> {
+    ) -> Result<(), ProviderErrorForChainSpec<ChainSpecT>> {
         let code = Bytecode::new_raw(code.clone());
         let irregular_code = code.clone();
 
@@ -1684,19 +1055,27 @@ impl<LoggerErrorT: Debug, TimerT: Clone + TimeSinceEpoch> ProviderData<LoggerErr
         Ok(())
     }
 
-    /// Sets the coinbase.
-    pub fn set_coinbase(&mut self, coinbase: Address) {
-        self.beneficiary = coinbase;
+    pub fn set_min_gas_price(
+        &mut self,
+        min_gas_price: u128,
+    ) -> Result<(), ProviderErrorForChainSpec<ChainSpecT>> {
+        if self.evm_spec_id() >= EvmSpecId::LONDON {
+            return Err(ProviderError::SetMinGasPriceUnsupported);
+        }
+
+        self.min_gas_price = min_gas_price;
+
+        Ok(())
     }
 
     /// Sets the next block's base fee per gas.
     pub fn set_next_block_base_fee_per_gas(
         &mut self,
-        base_fee_per_gas: U256,
-    ) -> Result<(), ProviderError<LoggerErrorT>> {
-        let spec_id = self.spec_id();
-        if spec_id < SpecId::LONDON {
-            return Err(ProviderError::SetNextBlockBaseFeePerGasUnsupported { spec_id });
+        base_fee_per_gas: u128,
+    ) -> Result<(), ProviderErrorForChainSpec<ChainSpecT>> {
+        let hardfork = self.hardfork();
+        if hardfork.into() < EvmSpecId::LONDON {
+            return Err(ProviderError::SetNextBlockBaseFeePerGasUnsupported { hardfork });
         }
 
         self.next_block_base_fee_per_gas = Some(base_fee_per_gas);
@@ -1708,9 +1087,9 @@ impl<LoggerErrorT: Debug, TimerT: Clone + TimeSinceEpoch> ProviderData<LoggerErr
     pub fn set_next_block_timestamp(
         &mut self,
         timestamp: u64,
-    ) -> Result<u64, ProviderError<LoggerErrorT>> {
+    ) -> Result<u64, ProviderErrorForChainSpec<ChainSpecT>> {
         let latest_block = self.blockchain.last_block()?;
-        let latest_block_header = latest_block.header();
+        let latest_block_header = latest_block.block_header();
 
         match timestamp.cmp(&latest_block_header.timestamp) {
             Ordering::Less => Err(ProviderError::TimestampLowerThanPrevious {
@@ -1733,10 +1112,10 @@ impl<LoggerErrorT: Debug, TimerT: Clone + TimeSinceEpoch> ProviderData<LoggerErr
     pub fn set_next_prev_randao(
         &mut self,
         prev_randao: B256,
-    ) -> Result<(), ProviderError<LoggerErrorT>> {
-        let spec_id = self.spec_id();
-        if spec_id < SpecId::MERGE {
-            return Err(ProviderError::SetNextPrevRandaoUnsupported { spec_id });
+    ) -> Result<(), ProviderErrorForChainSpec<ChainSpecT>> {
+        let hardfork = self.hardfork();
+        if hardfork.into() < EvmSpecId::MERGE {
+            return Err(ProviderError::SetNextPrevRandaoUnsupported { hardfork });
         }
 
         self.prev_randao_generator.set_next(prev_randao);
@@ -1748,8 +1127,8 @@ impl<LoggerErrorT: Debug, TimerT: Clone + TimeSinceEpoch> ProviderData<LoggerErr
         &mut self,
         address: Address,
         nonce: u64,
-    ) -> Result<(), ProviderError<LoggerErrorT>> {
-        if mempool::has_transactions(&self.mem_pool) {
+    ) -> Result<(), ProviderErrorForChainSpec<ChainSpecT>> {
+        if edr_mem_pool::has_transactions(&self.mem_pool) {
             return Err(ProviderError::SetAccountNonceWithPendingTransactions);
         }
 
@@ -1788,85 +1167,36 @@ impl<LoggerErrorT: Debug, TimerT: Clone + TimeSinceEpoch> ProviderData<LoggerErr
         Ok(())
     }
 
-    pub fn set_account_storage_slot(
-        &mut self,
-        address: Address,
-        index: U256,
-        value: U256,
-    ) -> Result<(), ProviderError<LoggerErrorT>> {
-        // We clone to automatically revert in case of subsequent errors.
-        let mut modified_state = (*self.current_state()?).clone();
-        let old_value = modified_state.set_account_storage_slot(address, index, value)?;
-
-        let slot = EvmStorageSlot::new_changed(old_value, value);
-        let account_info = modified_state.basic(address).and_then(|mut account_info| {
-            // Retrieve the code if it's not empty. This is needed for the irregular state.
-            if let Some(account_info) = &mut account_info {
-                if account_info.code_hash != KECCAK_EMPTY {
-                    account_info.code = Some(modified_state.code_by_hash(account_info.code_hash)?);
-                }
-            }
-
-            Ok(account_info)
-        })?;
-
-        let state_root = modified_state.state_root()?;
-
-        let block_number = self.blockchain.last_block_number();
-        self.irregular_state
-            .state_override_at_block_number(block_number)
-            .or_insert_with(|| StateOverride::with_state_root(state_root))
-            .diff
-            .apply_storage_change(address, index, slot, account_info);
-
-        self.add_state_to_cache(modified_state, block_number);
-
-        Ok(())
-    }
-
-    pub fn sign(
+    pub fn sign_transaction_request(
         &self,
-        address: &Address,
-        message: Bytes,
-    ) -> Result<signature::SignatureWithRecoveryId, ProviderError<LoggerErrorT>> {
-        match self.local_accounts.get(address) {
-            Some(secret_key) => Ok(signature::SignatureWithRecoveryId::new(
-                &message[..],
-                secret_key,
-            )?),
-            None => Err(ProviderError::UnknownAddress { address: *address }),
+        transaction_request: TransactionRequestAndSender<ChainSpecT::TransactionRequest>,
+    ) -> Result<ChainSpecT::SignedTransaction, ProviderErrorForChainSpec<ChainSpecT>> {
+        let TransactionRequestAndSender { request, sender } = transaction_request;
+
+        if self.impersonated_accounts.contains(&sender) {
+            let signed_transaction = request.fake_sign(sender);
+            transaction::validate(signed_transaction, self.evm_spec_id())
+                .map_err(ProviderError::TransactionCreationError)
+        } else {
+            let secret_key = self
+                .local_accounts
+                .get(&sender)
+                .ok_or(ProviderError::UnknownAddress { address: sender })?;
+
+            // SAFETY: We know the secret key belongs to the sender, as we retrieved it from
+            // `local_accounts`.
+            let signed_transaction =
+                unsafe { request.sign_for_sender_unchecked(secret_key, sender) }?;
+
+            transaction::validate(signed_transaction, self.evm_spec_id())
+                .map_err(ProviderError::TransactionCreationError)
         }
-    }
-
-    pub fn sign_typed_data_v4(
-        &self,
-        address: &Address,
-        message: &TypedData,
-    ) -> Result<signature::SignatureWithRecoveryId, ProviderError<LoggerErrorT>> {
-        match self.local_accounts.get(address) {
-            Some(secret_key) => {
-                let hash = message.eip712_signing_hash()?;
-                Ok(signature::SignatureWithRecoveryId::new(
-                    RecoveryMessage::Hash(hash),
-                    secret_key,
-                )?)
-            }
-            None => Err(ProviderError::UnknownAddress { address: *address }),
-        }
-    }
-
-    pub fn spec_id(&self) -> SpecId {
-        self.blockchain.spec_id()
-    }
-
-    pub fn stop_impersonating_account(&mut self, address: Address) -> bool {
-        self.impersonated_accounts.remove(&address)
     }
 
     pub fn total_difficulty_by_hash(
         &self,
         hash: &B256,
-    ) -> Result<Option<U256>, ProviderError<LoggerErrorT>> {
+    ) -> Result<Option<U256>, ProviderErrorForChainSpec<ChainSpecT>> {
         self.blockchain
             .total_difficulty_by_hash(hash)
             .map_err(ProviderError::Blockchain)
@@ -1877,7 +1207,10 @@ impl<LoggerErrorT: Debug, TimerT: Clone + TimeSinceEpoch> ProviderData<LoggerErr
     pub fn transaction_by_hash(
         &self,
         hash: &B256,
-    ) -> Result<Option<TransactionAndBlock>, ProviderError<LoggerErrorT>> {
+    ) -> Result<
+        Option<TransactionAndBlockForChainSpec<ChainSpecT>>,
+        ProviderErrorForChainSpec<ChainSpecT>,
+    > {
         let transaction = if let Some(tx) = self.mem_pool.transaction_by_hash(hash) {
             Some(TransactionAndBlock {
                 transaction: tx.pending().clone(),
@@ -1889,7 +1222,7 @@ impl<LoggerErrorT: Debug, TimerT: Clone + TimeSinceEpoch> ProviderData<LoggerErr
                 .blockchain
                 .receipt_by_transaction_hash(hash)?
                 .expect("If the transaction was inserted in a block, it must have a receipt")
-                .transaction_index;
+                .transaction_index();
             let tx_index =
                 usize::try_from(tx_index_u64).expect("Indices cannot be larger than usize::MAX");
 
@@ -1914,10 +1247,21 @@ impl<LoggerErrorT: Debug, TimerT: Clone + TimeSinceEpoch> ProviderData<LoggerErr
         Ok(transaction)
     }
 
+    pub fn transaction_receipt(
+        &self,
+        transaction_hash: &B256,
+    ) -> Result<Option<Arc<ChainSpecT::Receipt>>, ProviderErrorForChainSpec<ChainSpecT>> {
+        self.blockchain
+            .receipt_by_transaction_hash(transaction_hash)
+            .map_err(ProviderError::Blockchain)
+    }
+
+    /// Tries to add a transaction to the mempool and notifies subscribers about
+    /// it.
     fn add_pending_transaction(
         &mut self,
-        transaction: transaction::Signed,
-    ) -> Result<B256, ProviderError<LoggerErrorT>> {
+        transaction: ChainSpecT::SignedTransaction,
+    ) -> Result<B256, ProviderErrorForChainSpec<ChainSpecT>> {
         let transaction_hash = *transaction.transaction_hash();
 
         let state = self.current_state()?;
@@ -1929,366 +1273,284 @@ impl<LoggerErrorT: Debug, TimerT: Clone + TimeSinceEpoch> ProviderData<LoggerErr
         Ok(transaction_hash)
     }
 
-    /// Returns the block header and the transactions from the block that
-    /// contains the transaction for debug trace transactions.
-    fn block_data_for_debug_trace_transaction(
+    /// Retrieves the block number for the provided block spec, if it exists.
+    fn block_number_by_block_spec(
         &self,
-        transaction_hash: &B256,
-    ) -> Result<(Header, Vec<Signed>), ProviderError<LoggerErrorT>> {
-        // HACK: This is a hack to make `debug_traceTransaction` return a helpful error
-        // message in fork mode if there is a transaction in the block whose
-        // type is not supported or skip that transaction if an environment
-        // variable is set. This hack is only necessary until proper multichain
-        // support. https://github.com/NomicFoundation/edr/issues/570
-        self.rpc_client
-            .as_ref()
-            .and_then(|rpc_client| {
-                // Use `Result<Option>` in `block_in_place` to be able to short-circuit with
-                // `?`, but we want `Option<Result>` in the end as we're flat
-                // mapping an `Option`.
-                tokio::task::block_in_place::<_, Result<Option<_>, _>>(|| {
-                    // If the transaction is not found in the remote by the provided hash, there are
-                    // two possibilities:
-                    // 1. The transaction is from a local block. In this case, it must have valid
-                    //    transaction types, so we have nothing to do.
-                    // 2. There is no transaction with the provided hash. In this case the abstract
-                    //    interface will return an error.
-                    self.runtime_handle
-                        .block_on(rpc_client.get_transaction_by_hash(*transaction_hash))?
-                        .and_then::<Result<_, _>, _>(|transaction| {
-                            transaction
-                                .block_hash
-                                .ok_or_else(|| {
-                                    // If the transaction doesn't have a block hash, we treat the
-                                    // transaction hash as invalid.
-                                    ProviderError::<LoggerErrorT>::InvalidTransactionHash(
-                                        *transaction_hash,
-                                    )
-                                })
-                                .and_then(|block_hash| {
-                                    self.block_data_for_debug_trance_transaction_from_block_hash(
-                                        &block_hash,
-                                        transaction_hash,
-                                        rpc_client,
-                                    )
-                                })
-                                // Go from `Result<Option>` to `Option<Result>` as we're in a flat
-                                // map for an `Option`
-                                .transpose()
-                        })
-                        // Go back from `Option<Result>` to `Result<Option>` which is the expected
-                        // return type in the `block_in_place` to be able to short-circuit.
-                        .transpose()
-                })
-                // Go from `Result<Option>` to `Option<Result>` as we're in a flat
-                // map for an Option
-                .transpose()
-            })
-            // We have an `Option<Result>`, default with another `Option<Result>` from the generic
-            // blockchain interface if it's `None`.
-            .or_else(|| {
-                self.blockchain
-                    // Returns `Result<Option>`
-                    .block_by_transaction_hash(transaction_hash)
-                    .map_err(ProviderError::<LoggerErrorT>::Blockchain)
-                    // We need to return an `Option<Result>`
-                    .transpose()
-                    .map(|block| {
-                        // Map the value in the result then pass the result back out so the error
-                        // can be propagated if any.
-                        block.map(|block| {
-                            let transactions = block.transactions().to_vec();
-                            let header = block.header().clone();
-                            (header, transactions)
-                        })
-                    })
-            })
-            // Go from `Option<Result>` to `Result<Option>` to short-circuit the error.
-            .transpose()?
-            // If we couldn't find the transaction in the remote or local blockchains through the
-            // generic blockchain interface, then it's definitely invalid.
-            .ok_or_else(|| ProviderError::<LoggerErrorT>::InvalidTransactionHash(*transaction_hash))
-    }
-
-    fn block_data_for_debug_trance_transaction_from_block_hash(
-        &self,
-        block_hash: &B256,
-        transaction_hash: &B256,
-        rpc_client: &Arc<EthRpcClient<L1ChainSpec>>,
-    ) -> Result<Option<(Header, Vec<Signed>)>, ProviderError<LoggerErrorT>> {
-        let mut rpc_block = self
-            .runtime_handle
-            .block_on(rpc_client.get_block_by_hash_with_transaction_data(*block_hash))?
-            .ok_or_else(|| {
-                // If the remote returned a transaction for the transaction hash, but the block
-                // is not found, we treat the transaction hash as invalid.
-                ProviderError::<LoggerErrorT>::InvalidTransactionHash(*transaction_hash)
-            })?;
-
-        // SAFETY: We only need the header from the block later, so it's safe to take
-        // the transactions.
-        let transactions = std::mem::take(&mut rpc_block.transactions)
-            .into_iter()
-            .filter_map(|transaction| {
-                if let RpcTransactionType::Unknown(transaction_type) =
-                    transaction.transaction_type()
-                {
-                    if transaction_hash == &transaction.hash {
-                        Some(Err(ProviderError::<LoggerErrorT>::UnsupportedTransactionTypeForDebugTrace {
-                            transaction_hash: *transaction_hash,
-                            unsupported_transaction_type: transaction_type,
-                        }))
-                    } else if self.skip_unsupported_transaction_types  {
-                        None
-                    } else {
-                        Some(Err(
-                            ProviderError::<LoggerErrorT>::UnsupportedTransactionTypeInDebugTrace {
-                                requested_transaction_hash: *transaction_hash,
-                                unsupported_transaction_hash: transaction.hash,
-                                unsupported_transaction_type: transaction_type,
-                            },
-                        ))
-                    }
+        block_spec: &BlockSpec,
+    ) -> Result<Option<u64>, ProviderErrorForChainSpec<ChainSpecT>> {
+        let block_number = match block_spec {
+            BlockSpec::Number(number) => Some(*number),
+            BlockSpec::Tag(BlockTag::Earliest) => Some(0),
+            BlockSpec::Tag(tag @ (BlockTag::Finalized | BlockTag::Safe)) => {
+                if self.evm_spec_id() >= EvmSpecId::MERGE {
+                    Some(self.blockchain.last_block_number())
                 } else {
-                    Some(
-                        <L1ChainSpec as ChainSpec>::SignedTransaction::try_from(transaction)
-                            .map_err(RemoteBlockCreationError::from)
-                            .map_err(ForkedBlockchainError::from)
-                            .map_err(BlockchainError::from)
-                            .map_err(ProviderError::<LoggerErrorT>::from),
-                    )
+                    return Err(ProviderError::InvalidBlockTag {
+                        block_tag: *tag,
+                        hardfork: self.hardfork(),
+                    });
                 }
-            })
-            .collect::<Result<Vec<_>, ProviderError<LoggerErrorT>>>()?;
-
-        let block = rpc_block
-            .into_remote_block(rpc_client.clone(), self.runtime_handle.clone())
-            .map_err(ForkedBlockchainError::from)
-            .map_err(BlockchainError::from)?;
-
-        Ok(Some((block.header().clone(), transactions)))
-    }
-
-    /// Wrapper over `Blockchain::chain_id_at_block_number` that handles error
-    /// conversion.
-    fn chain_id_at_block_number(
-        &self,
-        block_number: u64,
-        block_spec: &BlockSpec,
-    ) -> Result<u64, ProviderError<LoggerErrorT>> {
-        self.blockchain
-            .chain_id_at_block_number(block_number)
-            .map_err(|err| match err {
-                BlockchainError::UnknownBlockNumber => ProviderError::InvalidBlockNumberOrHash {
-                    block_spec: block_spec.clone(),
-                    latest_block_number: self.blockchain.last_block_number(),
-                },
-                _ => ProviderError::Blockchain(err),
-            })
-    }
-
-    /// Creates an EVM configuration with the provided hardfork and chain id
-    fn create_evm_config(
-        &self,
-        spec_id: SpecId,
-        chain_id: u64,
-    ) -> Result<CfgEnvWithHandlerCfg, ProviderError<LoggerErrorT>> {
-        let mut cfg_env = CfgEnv::default();
-        cfg_env.chain_id = chain_id;
-        cfg_env.limit_contract_code_size = if self.allow_unlimited_contract_size {
-            Some(usize::MAX)
-        } else {
-            None
+            }
+            BlockSpec::Tag(BlockTag::Latest) => Some(self.blockchain.last_block_number()),
+            BlockSpec::Tag(BlockTag::Pending) => None,
+            BlockSpec::Eip1898(Eip1898BlockSpec::Hash { block_hash, .. }) => {
+                self.blockchain.block_by_hash(block_hash)?.map_or_else(
+                    || {
+                        Err(ProviderError::InvalidBlockNumberOrHash {
+                            block_spec: block_spec.clone(),
+                            latest_block_number: self.blockchain.last_block_number(),
+                        })
+                    },
+                    |block| Ok(Some(block.block_header().number)),
+                )?
+            }
+            BlockSpec::Eip1898(Eip1898BlockSpec::Number { block_number }) => Some(*block_number),
         };
-        cfg_env.disable_eip3607 = true;
 
-        Ok(CfgEnvWithHandlerCfg::new_with_spec_id(cfg_env, spec_id))
+        Ok(block_number)
     }
 
-    /// Creates a configuration, taking into the hardfork and chain id at the
+    /// Creates an [`EvmConfig`] with the provided chain id
+    fn create_evm_config(&self, chain_id: u64) -> EvmConfig {
+        EvmConfig {
+            chain_id,
+            disable_eip3607: true,
+            limit_contract_code_size: if self.allow_unlimited_contract_size {
+                Some(usize::MAX)
+            } else {
+                None
+            },
+            transaction_gas_cap: self.mem_pool.transaction_gas_cap(),
+        }
+    }
+
+    /// Creates a configuration, taking into account the hardfork at the
     /// provided `BlockSpec`.
-    fn create_evm_config_at_block_spec(
+    pub fn create_evm_config_at_block_spec(
         &self,
         block_spec: &BlockSpec,
-    ) -> Result<CfgEnvWithHandlerCfg, ProviderError<LoggerErrorT>> {
+    ) -> Result<CfgEnv<ChainSpecT::Hardfork>, ProviderErrorForChainSpec<ChainSpecT>> {
         let block_number = self.block_number_by_block_spec(block_spec)?;
 
-        let spec_id = if let Some(block_number) = block_number {
-            self.spec_at_block_number(block_number, block_spec)?
+        if let Some(block_number) = block_number {
+            // Return a meaningful error if the block number is out of range.
+            if block_number > self.blockchain.last_block_number() {
+                return Err(ProviderError::InvalidBlockNumberOrHash {
+                    block_spec: block_spec.clone(),
+                    latest_block_number: self.blockchain.last_block_number(),
+                });
+            }
+        }
+
+        let hardfork = if let Some(block_number) = block_number {
+            self.blockchain.spec_at_block_number(block_number)?
         } else {
-            self.blockchain.spec_id()
+            self.blockchain.hardfork()
         };
 
         let chain_id = if let Some(block_number) = block_number {
-            self.chain_id_at_block_number(block_number, block_spec)?
+            self.blockchain.chain_id_at_block_number(block_number)?
         } else {
             self.blockchain.chain_id()
         };
 
-        self.create_evm_config(spec_id, chain_id)
+        Ok(self.create_evm_config(chain_id).to_cfg_env(hardfork))
     }
 
-    fn execute_in_block_context<T>(
-        &mut self,
-        block_spec: Option<&BlockSpec>,
-        function: impl FnOnce(
-            &dyn SyncBlockchain<L1ChainSpec, BlockchainError, StateError>,
-            &Arc<dyn SyncBlock<L1ChainSpec, Error = BlockchainError>>,
-            &Box<dyn SyncState<StateError>>,
-        ) -> T,
-    ) -> Result<T, ProviderError<LoggerErrorT>> {
-        let block = if let Some(block_spec) = block_spec {
-            self.block_by_block_spec(block_spec)?
+    /// Retrieves the hardfork at the provided block spec, if it exists.
+    pub fn hardfork_at_block_spec(
+        &self,
+        block_spec: &BlockSpec,
+    ) -> Result<ChainSpecT::Hardfork, ProviderErrorForChainSpec<ChainSpecT>> {
+        let block_number = self.block_number_by_block_spec(block_spec)?;
+
+        if let Some(block_number) = block_number {
+            // Return a meaningful error if the block number is out of range.
+            if block_number > self.blockchain.last_block_number() {
+                return Err(ProviderError::InvalidBlockNumberOrHash {
+                    block_spec: block_spec.clone(),
+                    latest_block_number: self.blockchain.last_block_number(),
+                });
+            }
+
+            self.blockchain
+                .spec_at_block_number(block_number)
+                .map_err(ProviderError::Blockchain)
         } else {
-            Some(self.blockchain.last_block()?)
-        };
-
-        if let Some(block) = block {
-            let block_header = block.header();
-            let block_number = block_header.number;
-
-            let contextual_state = self.get_or_compute_state(block_number)?;
-
-            Ok(function(&*self.blockchain, &block, &contextual_state))
-        } else {
-            // Block spec is pending
-            let result = self.mine_pending_block()?;
-
-            let blockchain =
-                BlockchainWithPending::new(&*self.blockchain, result.block, result.state_diff);
-
-            let block = blockchain
-                .last_block()
-                .expect("The pending block is the last block");
-
-            Ok(function(&blockchain, &block, &result.state))
+            Ok(self.blockchain.hardfork())
         }
     }
 
-    /// Mine a block using the provided options. If an option has not been
+    fn current_state(
+        &mut self,
+    ) -> Result<Arc<Box<dyn DynState>>, ProviderErrorForChainSpec<ChainSpecT>> {
+        self.get_or_compute_state(self.last_block_number())
+    }
+
+    fn get_or_compute_state(
+        &mut self,
+        block_number: u64,
+    ) -> Result<Arc<Box<dyn DynState>>, ProviderErrorForChainSpec<ChainSpecT>> {
+        if let Some(state_id) = self.block_number_to_state_id.get(&block_number) {
+            // We cannot use `LruCache::try_get_or_insert`, because it needs &mut self, but
+            // we would need &self in the callback to reference the blockchain.
+            if let Some(state) = self.block_state_cache.get(state_id) {
+                return Ok(state.clone());
+            }
+        };
+
+        let state = self
+            .blockchain
+            .state_at_block_number(block_number, self.irregular_state.state_overrides())?;
+        let state_id = self.add_state_to_cache(state, block_number);
+        Ok(self
+            .block_state_cache
+            .get(&state_id)
+            // State must exist, since we just inserted it, and we have exclusive access to
+            // the cache due to &mut self.
+            .expect("State must exist")
+            .clone())
+    }
+
+    fn mine_and_commit_block_impl(
+        &mut self,
+        mine_fn: impl FnOnce(
+            &mut ProviderData<ChainSpecT, TimerT>,
+            &EvmConfig,
+            HeaderOverrides<ChainSpecT::Hardfork>,
+            &mut EvmObserver,
+        ) -> Result<
+            MineBlockResultAndStateWithMetadata<
+                <ChainSpecT as GenesisBlockFactory>::LocalBlock,
+                ChainSpecT::HaltReason,
+                EvmObservedData,
+            >,
+            ProviderErrorForChainSpec<ChainSpecT>,
+        >,
+        mut options: HeaderOverrides<ChainSpecT::Hardfork>,
+    ) -> Result<
+        MineBlockResultWithMetadataForChainSpec<ChainSpecT, EvmObservedData>,
+        ProviderErrorForChainSpec<ChainSpecT>,
+    > {
+        let (block_timestamp, new_offset) = self.next_block_timestamp(options.timestamp)?;
+        options.timestamp = Some(block_timestamp);
+
+        let result = self.mine_block(mine_fn, options)?;
+
+        let block_and_total_difficulty = self
+            .blockchain
+            .insert_block(
+                result.block_and_state.block,
+                result.block_and_state.state_diff,
+            )
+            .map_err(ProviderError::Blockchain)?;
+
+        self.mem_pool
+            .update(&result.block_and_state.state)
+            .map_err(ProviderError::MemPoolUpdate)?;
+
+        if let Some(new_offset) = new_offset {
+            self.block_time_offset_seconds = new_offset;
+        }
+
+        // Reset the next block base fee per gas upon successful execution
+        self.next_block_base_fee_per_gas.take();
+
+        // Reset next block time stamp
+        self.next_block_timestamp.take();
+
+        self.parent_beacon_block_root_generator.generate_next();
+        self.prev_randao_generator.generate_next();
+
+        self.notify_subscribers_about_mined_block(&block_and_total_difficulty)?;
+
+        self.add_state_to_cache(
+            result.block_and_state.state,
+            block_and_total_difficulty.block.block_header().number,
+        );
+
+        Ok(MineBlockResultWithMetadata::new(
+            block_and_total_difficulty.block,
+            result.precompile_addresses,
+            result.transaction_inspector_data,
+            result.block_and_state.transaction_results,
+        ))
+    }
+
+    /// Mines a block using the provided options. If an option has not been
     /// specified, it will be set using the provider's configuration values.
     fn mine_block(
         &mut self,
         mine_fn: impl FnOnce(
-            &mut ProviderData<LoggerErrorT, TimerT>,
-            &CfgEnvWithHandlerCfg,
-            BlockOptions,
-            &mut Debugger,
+            &mut ProviderData<ChainSpecT, TimerT>,
+            &EvmConfig,
+            HeaderOverrides<ChainSpecT::Hardfork>,
+            &mut EvmObserver,
         ) -> Result<
-            MineBlockResultAndState<L1ChainSpec, StateError>,
-            ProviderError<LoggerErrorT>,
+            MineBlockResultAndStateWithMetadata<
+                <ChainSpecT as GenesisBlockFactory>::LocalBlock,
+                ChainSpecT::HaltReason,
+                EvmObservedData,
+            >,
+            ProviderErrorForChainSpec<ChainSpecT>,
         >,
-        mut options: BlockOptions,
-    ) -> Result<DebugMineBlockResultAndState<StateError>, ProviderError<LoggerErrorT>> {
+        mut options: HeaderOverrides<ChainSpecT::Hardfork>,
+    ) -> Result<
+        MineBlockResultAndStateWithMetadata<
+            <ChainSpecT as GenesisBlockFactory>::LocalBlock,
+            ChainSpecT::HaltReason,
+            EvmObservedData,
+        >,
+        ProviderErrorForChainSpec<ChainSpecT>,
+    > {
         options.base_fee = options.base_fee.or(self.next_block_base_fee_per_gas);
         options.beneficiary = Some(options.beneficiary.unwrap_or(self.beneficiary));
         options.gas_limit = Some(options.gas_limit.unwrap_or_else(|| self.block_gas_limit()));
 
-        let evm_config =
-            self.create_evm_config(self.blockchain.spec_id(), self.blockchain.chain_id())?;
+        let evm_config = self.create_evm_config(self.blockchain.chain_id());
 
-        if options.mix_hash.is_none() && evm_config.handler_cfg.spec_id >= SpecId::MERGE {
+        let evm_spec_id = self.blockchain.hardfork().into();
+        if options.mix_hash.is_none() && evm_spec_id >= EvmSpecId::MERGE {
             options.mix_hash = Some(self.prev_randao_generator.next_value());
         }
 
-        if evm_config.handler_cfg.spec_id >= SpecId::CANCUN {
+        if evm_spec_id >= EvmSpecId::CANCUN {
             options.parent_beacon_block_root = options
                 .parent_beacon_block_root
                 .or_else(|| Some(self.parent_beacon_block_root_generator.next_value()));
         }
 
-        let mut debugger = Debugger::with_mocker(
-            Mocker::new(self.call_override.clone()),
-            self.verbose_tracing,
-        );
+        let mut evm_observer = EvmObserver::new(EvmObserverConfig::new(
+            &self.observability,
+            self.contract_decoder.clone(),
+        ));
 
-        let result = mine_fn(self, &evm_config, options, &mut debugger)?;
+        let result = mine_fn(self, &evm_config, options, &mut evm_observer)?;
 
-        let Debugger {
-            console_logger,
-            trace_collector,
-            ..
-        } = debugger;
+        if let Some(callback) = self.observability.on_collected_gas_report_fn.as_ref() {
+            let mut contract_decoder = self.contract_decoder.write();
 
-        let traces = trace_collector.into_traces();
+            let mut report = GasReport::default();
+            for (transaction, execution_result) in result
+                .block_and_state
+                .block
+                .transactions()
+                .iter()
+                .zip(result.block_and_state.transaction_results.iter())
+            {
+                report.add(
+                    &result.block_and_state.state,
+                    &mut contract_decoder,
+                    execution_result,
+                    transaction.kind(),
+                    transaction.data().clone(),
+                )?;
+            }
 
-        Ok(DebugMineBlockResultAndState::new(
-            result,
-            traces,
-            console_logger.into_encoded_messages(),
-        ))
-    }
-
-    fn mine_block_with_mem_pool(
-        &mut self,
-        config: &CfgEnvWithHandlerCfg,
-        options: BlockOptions,
-        debugger: &mut Debugger,
-    ) -> Result<MineBlockResultAndState<L1ChainSpec, StateError>, ProviderError<LoggerErrorT>> {
-        let state_to_be_modified = (*self.current_state()?).clone();
-        let result = mine_block(
-            self.blockchain.as_ref(),
-            state_to_be_modified,
-            &self.mem_pool,
-            config,
-            options,
-            self.min_gas_price,
-            self.initial_config.mining.mem_pool.order,
-            miner_reward(config.handler_cfg.spec_id).unwrap_or(U256::ZERO),
-            self.dao_activation_block,
-            Some(DebugContext {
-                data: debugger,
-                register_handles_fn: register_debugger_handles,
-            }),
-        )?;
+            callback(report).map_err(ProviderError::OnCollectedGasReportCallback)?;
+        }
 
         Ok(result)
-    }
-
-    fn mine_block_with_single_transaction(
-        &mut self,
-        config: &CfgEnvWithHandlerCfg,
-        options: BlockOptions,
-        transaction: transaction::Signed,
-        debugger: &mut Debugger,
-    ) -> Result<MineBlockResultAndState<L1ChainSpec, StateError>, ProviderError<LoggerErrorT>> {
-        let state_to_be_modified = (*self.current_state()?).clone();
-        let result = mine_block_with_single_transaction(
-            self.blockchain.as_ref(),
-            state_to_be_modified,
-            transaction,
-            config,
-            options,
-            self.min_gas_price,
-            miner_reward(config.handler_cfg.spec_id).unwrap_or(U256::ZERO),
-            self.dao_activation_block,
-            Some(DebugContext {
-                data: debugger,
-                register_handles_fn: register_debugger_handles,
-            }),
-        )?;
-
-        Ok(result)
-    }
-
-    /// Mines a pending block, without modifying any values.
-    pub fn mine_pending_block(
-        &mut self,
-    ) -> Result<DebugMineBlockResultAndState<StateError>, ProviderError<LoggerErrorT>> {
-        let (block_timestamp, _new_offset) = self.next_block_timestamp(None)?;
-
-        // Mining a pending block shouldn't affect the mix hash.
-        self.mine_block(
-            Self::mine_block_with_mem_pool,
-            BlockOptions {
-                timestamp: Some(block_timestamp),
-                ..BlockOptions::default()
-            },
-        )
-    }
-
-    pub fn mining_config(&self) -> &MiningConfig {
-        &self.initial_config.mining
     }
 
     /// Get the timestamp for the next block.
@@ -2296,9 +1558,9 @@ impl<LoggerErrorT: Debug, TimerT: Clone + TimeSinceEpoch> ProviderData<LoggerErr
     fn next_block_timestamp(
         &self,
         timestamp: Option<u64>,
-    ) -> Result<(u64, Option<i64>), ProviderError<LoggerErrorT>> {
+    ) -> Result<(u64, Option<i64>), ProviderErrorForChainSpec<ChainSpecT>> {
         let latest_block = self.blockchain.last_block()?;
-        let latest_block_header = latest_block.header();
+        let latest_block_header = latest_block.block_header();
 
         let current_timestamp =
             i64::try_from(self.timer.since_epoch()).expect("timestamp too large");
@@ -2337,135 +1599,10 @@ impl<LoggerErrorT: Debug, TimerT: Clone + TimeSinceEpoch> ProviderData<LoggerErr
         Ok((block_timestamp, new_offset))
     }
 
-    fn next_filter_id(&mut self) -> U256 {
-        self.last_filter_id = self
-            .last_filter_id
-            .checked_add(U256::from(1))
-            .expect("filter id starts at zero, so it'll never overflow for U256");
-        self.last_filter_id
-    }
-
-    /// Notifies subscribers to `FilterData::NewPendingTransactions` about the
-    /// pending transaction with the provided hash.
-    fn notify_subscribers_about_pending_transaction(&mut self, transaction_hash: &B256) {
-        for (filter_id, filter) in self.filters.iter_mut() {
-            if let FilterData::NewPendingTransactions(events) = &mut filter.data {
-                if filter.is_subscription {
-                    (self.subscriber_callback)(SubscriptionEvent {
-                        filter_id: *filter_id,
-                        result: SubscriptionEventData::NewPendingTransactions(*transaction_hash),
-                    });
-                } else {
-                    events.push(*transaction_hash);
-                }
-            }
-        }
-    }
-
-    /// Notifies subscribers to `FilterData::Logs` and `FilterData::NewHeads`
-    /// about the mined block.
-    fn notify_subscribers_about_mined_block(
-        &mut self,
-        block_and_total_difficulty: &BlockAndTotalDifficulty<L1ChainSpec, BlockchainError>,
-    ) -> Result<(), BlockchainError> {
-        let block = &block_and_total_difficulty.block;
-        for (filter_id, filter) in self.filters.iter_mut() {
-            match &mut filter.data {
-                FilterData::Logs { criteria, logs } => {
-                    let bloom = &block.header().logs_bloom;
-                    if bloom_contains_log_filter(bloom, criteria) {
-                        let receipts = block.transaction_receipts()?;
-                        let new_logs = receipts.iter().flat_map(|receipt| receipt.logs());
-
-                        let mut filtered_logs = filter_logs(new_logs, criteria);
-                        if filter.is_subscription {
-                            (self.subscriber_callback)(SubscriptionEvent {
-                                filter_id: *filter_id,
-                                result: SubscriptionEventData::Logs(filtered_logs.clone()),
-                            });
-                        } else {
-                            logs.append(&mut filtered_logs);
-                        }
-                    }
-                }
-                FilterData::NewHeads(block_hashes) => {
-                    if filter.is_subscription {
-                        (self.subscriber_callback)(SubscriptionEvent {
-                            filter_id: *filter_id,
-                            result: SubscriptionEventData::NewHeads(
-                                block_and_total_difficulty.clone(),
-                            ),
-                        });
-                    } else {
-                        block_hashes.push(*block.hash());
-                    }
-                }
-                FilterData::NewPendingTransactions(_) => (),
-            }
-        }
-
-        // Remove outdated filters
-        self.filters.retain(|_, filter| !filter.has_expired());
-
-        Ok(())
-    }
-
-    fn remove_filter_impl<const IS_SUBSCRIPTION: bool>(&mut self, filter_id: &U256) -> bool {
-        if let Some(filter) = self.filters.get(filter_id) {
-            filter.is_subscription == IS_SUBSCRIPTION && self.filters.remove(filter_id).is_some()
-        } else {
-            false
-        }
-    }
-
-    /// Wrapper over `Blockchain::spec_at_block_number` that handles error
-    /// conversion.
-    fn spec_at_block_number(
-        &self,
-        block_number: u64,
-        block_spec: &BlockSpec,
-    ) -> Result<SpecId, ProviderError<LoggerErrorT>> {
-        self.blockchain
-            .spec_at_block_number(block_number)
-            .map_err(|err| match err {
-                BlockchainError::UnknownBlockNumber => ProviderError::InvalidBlockNumberOrHash {
-                    block_spec: block_spec.clone(),
-                    latest_block_number: self.blockchain.last_block_number(),
-                },
-                _ => ProviderError::Blockchain(err),
-            })
-    }
-
-    pub fn sign_transaction_request(
-        &self,
-        transaction_request: TransactionRequestAndSender,
-    ) -> Result<transaction::Signed, ProviderError<LoggerErrorT>> {
-        let TransactionRequestAndSender { request, sender } = transaction_request;
-
-        if self.impersonated_accounts.contains(&sender) {
-            let signed_transaction = request.fake_sign(sender);
-            transaction::validate(signed_transaction, self.blockchain.spec_id())
-                .map_err(ProviderError::TransactionCreationError)
-        } else {
-            let secret_key = self
-                .local_accounts
-                .get(&sender)
-                .ok_or(ProviderError::UnknownAddress { address: sender })?;
-
-            // SAFETY: We know the secret key belongs to the sender, as we retrieved it from
-            // `local_accounts`.
-            let signed_transaction =
-                unsafe { request.sign_for_sender_unchecked(secret_key, sender) }?;
-
-            transaction::validate(signed_transaction, self.blockchain.spec_id())
-                .map_err(ProviderError::TransactionCreationError)
-        }
-    }
-
     fn validate_auto_mine_transaction(
         &mut self,
-        transaction: &transaction::Signed,
-    ) -> Result<(), ProviderError<LoggerErrorT>> {
+        transaction: &ChainSpecT::SignedTransaction,
+    ) -> Result<(), ProviderErrorForChainSpec<ChainSpecT>> {
         let next_nonce = { self.account_next_nonce(transaction.caller())? };
 
         match transaction.nonce().cmp(&next_nonce) {
@@ -2473,14 +1610,14 @@ impl<LoggerErrorT: Debug, TimerT: Clone + TimeSinceEpoch> ProviderData<LoggerErr
                 return Err(ProviderError::AutoMineNonceTooLow {
                     expected: next_nonce,
                     actual: transaction.nonce(),
-                })
+                });
             }
             Ordering::Equal => (),
             Ordering::Greater => {
                 return Err(ProviderError::AutoMineNonceTooHigh {
                     expected: next_nonce,
                     actual: transaction.nonce(),
-                })
+                });
             }
         }
 
@@ -2488,27 +1625,27 @@ impl<LoggerErrorT: Debug, TimerT: Clone + TimeSinceEpoch> ProviderData<LoggerErr
             .max_priority_fee_per_gas()
             .unwrap_or_else(|| transaction.gas_price());
 
-        if max_priority_fee_per_gas < self.min_gas_price {
+        if *max_priority_fee_per_gas < self.min_gas_price {
             return Err(ProviderError::AutoMinePriorityFeeTooLow {
                 expected: self.min_gas_price,
-                actual: max_priority_fee_per_gas,
+                actual: *max_priority_fee_per_gas,
             });
         }
 
         if let Some(next_block_base_fee) = self.next_block_base_fee_per_gas()? {
             if let Some(max_fee_per_gas) = transaction.max_fee_per_gas() {
-                if max_fee_per_gas < next_block_base_fee {
+                if *max_fee_per_gas < next_block_base_fee {
                     return Err(ProviderError::AutoMineMaxFeePerGasTooLow {
                         expected: next_block_base_fee,
-                        actual: max_fee_per_gas,
+                        actual: *max_fee_per_gas,
                     });
                 }
             } else {
                 let gas_price = transaction.gas_price();
-                if gas_price < next_block_base_fee {
+                if *gas_price < next_block_base_fee {
                     return Err(ProviderError::AutoMineGasPriceTooLow {
                         expected: next_block_base_fee,
-                        actual: gas_price,
+                        actual: *gas_price,
                     });
                 }
             }
@@ -2516,48 +1653,1228 @@ impl<LoggerErrorT: Debug, TimerT: Clone + TimeSinceEpoch> ProviderData<LoggerErr
 
         Ok(())
     }
+}
 
-    fn current_state(
-        &mut self,
-    ) -> Result<Arc<Box<dyn SyncState<StateError>>>, ProviderError<LoggerErrorT>> {
-        self.get_or_compute_state(self.last_block_number())
+impl<ChainSpecT, TimerT> ProviderData<ChainSpecT, TimerT>
+where
+    ChainSpecT: SyncProviderSpec<TimerT>,
+    TimerT: Clone + TimeSinceEpoch,
+{
+    /// Returns the chain ID.
+    pub fn chain_id(&self) -> u64 {
+        self.blockchain.chain_id()
     }
 
-    fn get_or_compute_state(
-        &mut self,
-        block_number: u64,
-    ) -> Result<Arc<Box<dyn SyncState<StateError>>>, ProviderError<LoggerErrorT>> {
-        if let Some(state_id) = self.block_number_to_state_id.get(&block_number) {
-            // We cannot use `LruCache::try_get_or_insert`, because it needs &mut self, but
-            // we would need &self in the callback to reference the blockchain.
-            if let Some(state) = self.block_state_cache.get(state_id) {
-                return Ok(state.clone());
+    pub fn chain_id_at_block_spec(
+        &self,
+        block_spec: &BlockSpec,
+    ) -> Result<u64, ProviderErrorForChainSpec<ChainSpecT>> {
+        let block_number = self.block_number_by_block_spec(block_spec)?;
+
+        let chain_id = if let Some(block_number) = block_number {
+            // Return a meaningful error if the block number is out of range.
+            if block_number > self.blockchain.last_block_number() {
+                return Err(ProviderError::InvalidBlockNumberOrHash {
+                    block_spec: block_spec.clone(),
+                    latest_block_number: self.blockchain.last_block_number(),
+                });
             }
+
+            self.blockchain.chain_id_at_block_number(block_number)?
+        } else {
+            self.blockchain.chain_id()
         };
 
-        let state = self
-            .blockchain
-            .state_at_block_number(block_number, self.irregular_state.state_overrides())?;
-        let state_id = self.add_state_to_cache(state, block_number);
-        Ok(self
-            .block_state_cache
-            .get(&state_id)
-            // State must exist, since we just inserted it, and we have exclusive access to
-            // the cache due to &mut self.
-            .expect("State must exist")
-            .clone())
+        Ok(chain_id)
     }
 
-    fn add_state_to_cache(
+    /// Returns the local EVM's [`EvmSpecId`].
+    pub fn evm_spec_id(&self) -> EvmSpecId {
+        self.hardfork().into()
+    }
+
+    /// Returns the local hardfork.
+    pub fn hardfork(&self) -> ChainSpecT::Hardfork {
+        self.blockchain.hardfork()
+    }
+
+    /// Returns the last block in the blockchain.
+    pub fn last_block(&self) -> Result<Arc<ChainSpecT::Block>, DynBlockchainError> {
+        self.blockchain.last_block()
+    }
+
+    /// Returns the number of the last block in the blockchain.
+    pub fn last_block_number(&self) -> u64 {
+        self.blockchain.last_block_number()
+    }
+
+    /// Makes a snapshot of the instance's state and returns the snapshot ID.
+    pub fn make_snapshot(&mut self) -> u64 {
+        let id = self.next_snapshot_id;
+        self.next_snapshot_id += 1;
+
+        let snapshot = Snapshot {
+            block_number: self.blockchain.last_block_number(),
+            block_number_to_state_id: self.block_number_to_state_id.clone(),
+            block_time_offset_seconds: self.block_time_offset_seconds,
+            coinbase: self.beneficiary,
+            irregular_state: self.irregular_state.clone(),
+            mem_pool: self.mem_pool.clone(),
+            next_block_base_fee_per_gas: self.next_block_base_fee_per_gas,
+            next_block_timestamp: self.next_block_timestamp,
+            parent_beacon_block_root_generator: self.parent_beacon_block_root_generator.clone(),
+            prev_randao_generator: self.prev_randao_generator.clone(),
+            time: Instant::now(),
+        };
+        self.snapshots.insert(id, snapshot);
+
+        id
+    }
+
+    /// Calculates the next block's base fee per gas.
+    pub fn next_block_base_fee_per_gas(&self) -> Result<Option<u128>, DynBlockchainError> {
+        if self.evm_spec_id() < EvmSpecId::LONDON {
+            return Ok(None);
+        }
+
+        self.next_block_base_fee_per_gas
+            .map_or_else(
+                || {
+                    let last_block = self.last_block()?;
+                    Ok(self.calculate_next_block_base_fee(last_block.block_header()))
+                },
+                Ok,
+            )
+            .map(Some)
+    }
+
+    /// Calculates the next block's base fee per blob gas.
+    pub fn next_block_base_fee_per_blob_gas(&self) -> Result<Option<u128>, DynBlockchainError> {
+        if self.evm_spec_id() < EvmSpecId::CANCUN {
+            return Ok(None);
+        }
+
+        let last_block = self.last_block()?;
+        let base_fee = calculate_next_base_fee_per_blob_gas(
+            last_block.block_header(),
+            self.hardfork(),
+            self.scheduled_blob_params(),
+        );
+
+        Ok(Some(base_fee))
+    }
+
+    /// Calculates the gas price for the next block.
+    pub fn next_gas_price(&self) -> Result<u128, DynBlockchainError> {
+        if let Some(next_block_base_fee_per_gas) = self.next_block_base_fee_per_gas()? {
+            let suggested_priority_fee_per_gas = 1_000_000_000u128;
+            Ok(next_block_base_fee_per_gas + suggested_priority_fee_per_gas)
+        } else {
+            // We return a hardcoded value for networks without EIP-1559
+            Ok(8_000_000_000)
+        }
+    }
+
+    fn calculate_next_block_base_fee(&self, header: &BlockHeader) -> u128 {
+        ChainSpecT::next_base_fee_per_gas(
+            header,
+            self.hardfork(),
+            &self.block_config.base_fee_params,
+        )
+    }
+}
+
+impl<ChainSpecT, TimerT> ProviderData<ChainSpecT, TimerT>
+where
+    ChainSpecT: SyncProviderSpec<
+        TimerT,
+        SignedTransaction: Default + TransactionValidation<ValidationError: PartialEq>,
+    >,
+    TimerT: Clone + TimeSinceEpoch,
+{
+    /// Returns the balance of the account corresponding to the provided address
+    /// at the optionally specified [`BlockSpec`]. Otherwise uses the last
+    /// block.
+    pub fn balance(
         &mut self,
-        state: Box<dyn SyncState<StateError>>,
-        block_number: u64,
-    ) -> StateId {
-        let state_id = self.current_state_id.increment();
-        self.block_state_cache.push(state_id, Arc::new(state));
-        self.block_number_to_state_id
-            .insert_mut(block_number, state_id);
-        state_id
+        address: Address,
+        block_spec: Option<&BlockSpec>,
+    ) -> Result<U256, ProviderErrorForChainSpec<ChainSpecT>> {
+        self.execute_in_block_context::<Result<U256, ProviderErrorForChainSpec<ChainSpecT>>>(
+            block_spec,
+            move |_blockchain, _block, state| {
+                Ok(state
+                    .basic(address)?
+                    .map_or(U256::ZERO, |account| account.balance))
+            },
+        )?
+    }
+
+    pub fn debug_trace_call(
+        &mut self,
+        transaction: ChainSpecT::SignedTransaction,
+        block_spec: &BlockSpec,
+        tracing_options: GethDebugTracingOptions,
+    ) -> Result<DebugTraceResultWithCallTraces, ProviderErrorForChainSpec<ChainSpecT>> {
+        let cfg_env = self.create_evm_config_at_block_spec(block_spec)?;
+
+        let mut debug_inspector = DebugInspector::new(tracing_options)
+            .map_err(DebugTraceError::from_debug_inspector_creation_error)?;
+
+        // Disable call overrides for `debug_traceCall`
+        let mut evm_observer = EvmObserver::new(EvmObserverConfig {
+            call_override: None,
+            ..EvmObserverConfig::new(&self.observability, self.contract_decoder.clone())
+        });
+
+        let custom_precompiles = self.precompile_overrides.clone();
+
+        let include_call_traces = self.observability.include_call_traces;
+        let scheduled_blob_params = self.scheduled_blob_params().cloned();
+        self.execute_in_block_context(Some(block_spec), move |blockchain, block, state| {
+            let block_env = BlockEnvWithZeroBaseFee::new(ChainSpecT::BlockEnv::new_block_env(
+                block.block_header(),
+                cfg_env.spec,
+                scheduled_blob_params.as_ref(),
+            ));
+
+            let result = guaranteed_dry_run_with_inspector::<ChainSpecT, _, _, _, _>(
+                blockchain,
+                state.as_ref(),
+                cfg_env,
+                transaction.clone(),
+                &block_env,
+                &custom_precompiles,
+                &mut DualInspector::new(&mut debug_inspector, &mut evm_observer),
+            )?;
+
+            let EvmObservedData {
+                address_to_executed_code: _,
+                call_trace_arena,
+                encoded_console_logs: _,
+            } = evm_observer.collect_and_report(&result.precompile_addresses)?;
+
+            let mut database = WrapDatabaseRef(DatabaseComponents {
+                blockchain,
+                state: state.as_ref(),
+            });
+
+            let call_trace_arenas =
+                if include_call_traces.should_include(|| !result.result.is_success()) {
+                    vec![call_trace_arena]
+                } else {
+                    Vec::new()
+                };
+
+            let geth_trace = debug_inspector
+                .get_result(
+                    None,
+                    &transaction,
+                    &block_env,
+                    &result.into_result_and_state(),
+                    &mut database,
+                )
+                .map_err(DebugTraceError::from_debug_inspector_result_error)?;
+
+            Ok(DebugTraceResultWithCallTraces {
+                result: geth_trace,
+                call_trace_arenas,
+            })
+        })?
+    }
+
+    // Matches Hardhat implementation
+    pub fn fee_history(
+        &mut self,
+        block_count: u64,
+        newest_block_spec: &BlockSpec,
+        percentiles: Vec<RewardPercentile>,
+    ) -> Result<FeeHistoryResult, ProviderErrorForChainSpec<ChainSpecT>> {
+        if self.evm_spec_id() < EvmSpecId::LONDON {
+            return Err(ProviderError::UnmetHardfork {
+                actual: self.evm_spec_id(),
+                minimum: EvmSpecId::LONDON,
+            });
+        }
+
+        let latest_block_number = self.last_block_number();
+        let pending_block_number = latest_block_number + 1;
+        let newest_block_number = self
+            .block_by_block_spec(newest_block_spec)?
+            // None if pending block
+            .map_or(pending_block_number, |block| block.block_header().number);
+        let oldest_block_number = if newest_block_number < block_count {
+            0
+        } else {
+            newest_block_number - block_count + 1
+        };
+        let last_block_number = newest_block_number + 1;
+
+        let pending_block = if last_block_number >= pending_block_number {
+            let MineBlockResultAndStateWithMetadata {
+                block_and_state: BuiltBlockAndState { block, .. },
+                ..
+            } = self.mine_pending_block()?;
+            Some(block)
+        } else {
+            None
+        };
+
+        let mut result = FeeHistoryResult::new(oldest_block_number);
+
+        let mut opt_reward = if percentiles.is_empty() {
+            None
+        } else {
+            Some(Vec::default())
+        };
+
+        let range_includes_remote_blocks = self
+            .fork_metadata
+            .as_ref()
+            .is_some_and(|metadata| oldest_block_number <= metadata.fork_block_number);
+
+        if range_includes_remote_blocks {
+            let last_remote_block = cmp::min(
+                self.fork_metadata
+                    .as_ref()
+                    .expect("we checked that there is a fork")
+                    .fork_block_number,
+                last_block_number,
+            );
+            let remote_block_count = last_remote_block - oldest_block_number + 1;
+
+            let rpc_client = self
+                .rpc_client
+                .as_ref()
+                .expect("we checked that there is a fork");
+            let FeeHistoryResult {
+                oldest_block: _,
+                base_fee_per_gas,
+                gas_used_ratio,
+                reward: remote_reward,
+            } = tokio::task::block_in_place(|| {
+                self.runtime_handle.block_on(rpc_client.fee_history(
+                    remote_block_count,
+                    newest_block_spec.clone(),
+                    percentiles.clone(),
+                ))
+            })?;
+
+            result.base_fee_per_gas = base_fee_per_gas;
+            result.gas_used_ratio = gas_used_ratio;
+            if let Some(reward) = opt_reward.as_mut()
+                && let Some(remote_reward) = remote_reward
+            {
+                *reward = remote_reward;
+            }
+        }
+
+        let first_local_block = if range_includes_remote_blocks {
+            cmp::min(
+                self.fork_metadata
+                    .as_ref()
+                    .expect("we checked that there is a fork")
+                    .fork_block_number,
+                last_block_number,
+            ) + 1
+        } else {
+            oldest_block_number
+        };
+
+        for block_number in first_local_block..=last_block_number {
+            if block_number < pending_block_number {
+                let block = self
+                    .blockchain
+                    .block_by_number(block_number)?
+                    .expect("Block must exist as i is at most the last block number");
+
+                let header = block.block_header();
+                result
+                    .base_fee_per_gas
+                    .push(header.base_fee_per_gas.unwrap_or(0));
+
+                if block_number < last_block_number {
+                    result
+                        .gas_used_ratio
+                        .push(gas_used_ratio(header.gas_used, header.gas_limit));
+
+                    if let Some(reward) = opt_reward.as_mut() {
+                        reward.push(compute_rewards::<ChainSpecT>(block.as_ref(), &percentiles)?);
+                    }
+                }
+            } else if block_number == pending_block_number {
+                let next_block_base_fee_per_gas = self
+                    .next_block_base_fee_per_gas()?
+                    .expect("We checked that EIP-1559 is active");
+                result.base_fee_per_gas.push(next_block_base_fee_per_gas);
+
+                if block_number < last_block_number {
+                    let block = pending_block.as_ref().expect("We mined the pending block");
+                    let header = block.block_header();
+                    result
+                        .gas_used_ratio
+                        .push(gas_used_ratio(header.gas_used, header.gas_limit));
+
+                    if let Some(reward) = opt_reward.as_mut() {
+                        // We don't compute this for the pending block, as there's no
+                        // effective miner fee yet.
+                        reward.push(percentiles.iter().map(|_| U256::ZERO).collect());
+                    }
+                }
+            } else if block_number == pending_block_number + 1 {
+                let block = pending_block.as_ref().expect("We mined the pending block");
+                result
+                    .base_fee_per_gas
+                    .push(self.calculate_next_block_base_fee(block.block_header()));
+            }
+        }
+
+        if let Some(reward) = opt_reward {
+            result.reward = Some(reward);
+        }
+
+        Ok(result)
+    }
+
+    pub fn get_code(
+        &mut self,
+        address: Address,
+        block_spec: Option<&BlockSpec>,
+    ) -> Result<Bytes, ProviderErrorForChainSpec<ChainSpecT>> {
+        self.execute_in_block_context(block_spec, move |_blockchain, _block, state| {
+            let code = state
+                .basic(address)?
+                .map_or(Ok(Bytes::new()), |account_info| {
+                    state.code_by_hash(account_info.code_hash).map(|bytecode| {
+                        // The `Bytecode` REVM struct pad the bytecode with 33 bytes of 0s for the
+                        // `Checked` and `Analysed` variants. `Bytecode::original_bytes` returns
+                        // unpadded version.
+                        bytecode.original_bytes()
+                    })
+                })?;
+
+            Ok(code)
+        })?
+    }
+
+    pub fn get_proof(
+        &mut self,
+        address: Address,
+        storage_keys: Vec<StorageKey>,
+        block_spec: &BlockSpec,
+    ) -> Result<EIP1186AccountProofResponse, ProviderErrorForChainSpec<ChainSpecT>> {
+        self.execute_in_block_context::<Result<EIP1186AccountProofResponse, ProviderErrorForChainSpec<ChainSpecT>>>(
+            Some(block_spec),
+            move |_blockchain, _block, state| Ok(state.proof(address, storage_keys)?), )?
+    }
+
+    pub fn get_storage_at(
+        &mut self,
+        address: Address,
+        index: U256,
+        block_spec: Option<&BlockSpec>,
+    ) -> Result<U256, ProviderErrorForChainSpec<ChainSpecT>> {
+        self.execute_in_block_context::<Result<U256, ProviderErrorForChainSpec<ChainSpecT>>>(
+            block_spec,
+            move |_blockchain, _block, state| Ok(state.storage(address, index)?),
+        )?
+    }
+
+    pub fn get_transaction_count(
+        &mut self,
+        address: Address,
+        block_spec: Option<&BlockSpec>,
+    ) -> Result<u64, ProviderErrorForChainSpec<ChainSpecT>> {
+        self.execute_in_block_context::<Result<u64, ProviderErrorForChainSpec<ChainSpecT>>>(
+            block_spec,
+            move |_blockchain, _block, state| {
+                let nonce = state
+                    .basic(address)?
+                    .map_or(0, |account_info| account_info.nonce);
+
+                Ok(nonce)
+            },
+        )?
+    }
+
+    #[cfg_attr(feature = "tracing", tracing::instrument(skip_all))]
+    pub fn interval_mine(&mut self) -> Result<bool, ProviderErrorForChainSpec<ChainSpecT>> {
+        let result = self.mine_and_commit_block(self.header_overrides())?;
+
+        self.logger
+            .log_interval_mined(&result)
+            .map_err(ProviderError::Logger)?;
+
+        Ok(true)
+    }
+
+    /// Mines a block with the provided options, using transactions in the
+    /// mempool, and commits it to the blockchain.
+    pub fn mine_and_commit_block(
+        &mut self,
+        options: HeaderOverrides<ChainSpecT::Hardfork>,
+    ) -> Result<
+        MineBlockResultWithMetadataForChainSpec<ChainSpecT, EvmObservedData>,
+        ProviderErrorForChainSpec<ChainSpecT>,
+    > {
+        self.mine_and_commit_block_impl(Self::mine_block_with_mem_pool, options)
+    }
+
+    /// Mines `number_of_blocks` blocks with the provided `interval` between
+    /// them.
+    pub fn mine_and_commit_blocks(
+        &mut self,
+        number_of_blocks: u64,
+        interval: u64,
+    ) -> Result<
+        Vec<MineBlockResultWithMetadataForChainSpec<ChainSpecT, EvmObservedData>>,
+        ProviderErrorForChainSpec<ChainSpecT>,
+    > {
+        // There should be at least 2 blocks left for the reservation to work,
+        // because we always mine a block after it. But here we use a bigger
+        // number to err on the side of safety.
+        const MINIMUM_RESERVABLE_BLOCKS: u64 = 6;
+
+        if number_of_blocks == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mine_block_with_interval =
+            |data: &mut ProviderData<ChainSpecT, TimerT>,
+             mined_blocks: &mut Vec<
+                MineBlockResultWithMetadataForChainSpec<ChainSpecT, EvmObservedData>,
+            >|
+             -> Result<(), ProviderErrorForChainSpec<ChainSpecT>> {
+                let previous_timestamp = mined_blocks
+                    .last()
+                    .expect("at least one block was mined")
+                    .block
+                    .block_header()
+                    .timestamp;
+
+                let options = data.header_overrides_with_timestamp(previous_timestamp + interval);
+
+                let mined_block = data.mine_and_commit_block(options)?;
+                mined_blocks.push(mined_block);
+
+                Ok(())
+            };
+
+        // Limit the pre-allocated capacity based on the minimum reservable number of
+        // blocks to avoid too large allocations.
+        let mut mined_blocks = Vec::with_capacity(
+            usize::try_from(number_of_blocks.min(2 * MINIMUM_RESERVABLE_BLOCKS))
+                .expect("number of blocks exceeds {u64::MAX}"),
+        );
+
+        // we always mine the first block, and we don't apply the interval for it
+        mined_blocks.push(self.mine_and_commit_block(self.header_overrides())?);
+
+        while u64::try_from(mined_blocks.len()).expect("usize cannot be larger than u128")
+            < number_of_blocks
+            && self.mem_pool.has_pending_transactions()
+        {
+            mine_block_with_interval(self, &mut mined_blocks)?;
+        }
+
+        // If there is at least one remaining block, we mine one. This way, we
+        // guarantee that there's an empty block immediately before and after the
+        // reservation. This makes the logging easier to get right.
+        if u64::try_from(mined_blocks.len()).expect("usize cannot be larger than u128")
+            < number_of_blocks
+        {
+            mine_block_with_interval(self, &mut mined_blocks)?;
+        }
+
+        let remaining_blocks = number_of_blocks
+            - u64::try_from(mined_blocks.len()).expect("usize cannot be larger than u128");
+
+        if remaining_blocks < MINIMUM_RESERVABLE_BLOCKS {
+            for _ in 0..remaining_blocks {
+                mine_block_with_interval(self, &mut mined_blocks)?;
+            }
+        } else {
+            let current_state = (*self.current_state()?).clone();
+
+            self.blockchain
+                .reserve_blocks(&self.block_config, remaining_blocks - 1, interval)?;
+
+            // Ensure there is a cache entry for the last reserved block, to avoid
+            // recomputation
+            self.add_state_to_cache(current_state, self.last_block_number());
+
+            let previous_timestamp = self.blockchain.last_block()?.block_header().timestamp;
+            let options = self.header_overrides_with_timestamp(previous_timestamp + interval);
+
+            let mined_block = self.mine_and_commit_block(options)?;
+            mined_blocks.push(mined_block);
+        }
+
+        mined_blocks.shrink_to_fit();
+
+        Ok(mined_blocks)
+    }
+
+    /// Mines a pending block, without modifying any values.
+    pub fn mine_pending_block(
+        &mut self,
+    ) -> Result<
+        MineBlockResultAndStateWithMetadata<
+            <ChainSpecT as GenesisBlockFactory>::LocalBlock,
+            ChainSpecT::HaltReason,
+            EvmObservedData,
+        >,
+        ProviderErrorForChainSpec<ChainSpecT>,
+    > {
+        let (block_timestamp, _new_offset) = self.next_block_timestamp(None)?;
+
+        // Mining a pending block shouldn't affect the mix hash.
+        self.mine_block(
+            Self::mine_block_with_mem_pool,
+            self.header_overrides_with_timestamp(block_timestamp),
+        )
+    }
+
+    pub fn nonce(
+        &mut self,
+        address: &Address,
+        block_spec: Option<&BlockSpec>,
+        state_overrides: &StateOverrides,
+    ) -> Result<u64, ProviderErrorForChainSpec<ChainSpecT>> {
+        state_overrides
+            .account_override(address)
+            .and_then(|account_override| account_override.nonce)
+            .map_or_else(
+                || {
+                    if matches!(block_spec, Some(BlockSpec::Tag(BlockTag::Pending))) {
+                        self.account_next_nonce(address)
+                    } else {
+                        self.execute_in_block_context(
+                            block_spec,
+                            move |_blockchain, _block, state| {
+                                let nonce =
+                                    state.basic(*address)?.map_or(0, |account| account.nonce);
+
+                                Ok(nonce)
+                            },
+                        )?
+                    }
+                },
+                Ok,
+            )
+    }
+
+    pub fn run_call(
+        &mut self,
+        transaction: ChainSpecT::SignedTransaction,
+        block_spec: &BlockSpec,
+        state_overrides: &StateOverrides,
+    ) -> Result<CallResult<ChainSpecT::HaltReason>, ProviderErrorForChainSpec<ChainSpecT>> {
+        let call_result = self.run_call_impl(transaction.clone(), block_spec, state_overrides)?;
+
+        self.logger
+            .log_call(&transaction, &call_result)
+            .map_err(ProviderError::Logger)?;
+
+        if self.bail_on_call_failure
+            && let Some(failure) = TransactionFailure::from_execution_result::<ChainSpecT, TimerT>(
+                &call_result.execution_result,
+                None,
+                &call_result.address_to_executed_code,
+                &call_result.call_trace_arena,
+                self.contract_decoder.as_ref(),
+            )
+        {
+            return Err(ProviderError::TransactionFailed(Box::new(
+                TransactionFailureWithCallTraces {
+                    failure,
+                    call_trace_arenas: if self
+                        .observability
+                        .include_call_traces
+                        .should_include(|| !call_result.execution_result.is_success())
+                    {
+                        vec![call_result.call_trace_arena]
+                    } else {
+                        Vec::new()
+                    },
+                },
+            )));
+        }
+
+        Ok(call_result.into_call_result(self.observability.include_call_traces))
+    }
+
+    fn run_call_impl(
+        &mut self,
+        transaction: ChainSpecT::SignedTransaction,
+        block_spec: &BlockSpec,
+        state_overrides: &StateOverrides,
+    ) -> Result<CallResultWithMetadata<ChainSpecT::HaltReason>, ProviderErrorForChainSpec<ChainSpecT>>
+    {
+        struct GasReportArgs {
+            callback: Box<dyn SyncOnCollectedGasReportCallback>,
+            kind: TxKind,
+            input: Bytes,
+        }
+
+        let cfg_env = self.create_evm_config_at_block_spec(block_spec)?;
+
+        let custom_precompiles = self.precompile_overrides.clone();
+        let mut evm_observer = EvmObserver::new(EvmObserverConfig::new(
+            &self.observability,
+            self.contract_decoder.clone(),
+        ));
+
+        let gas_report_args =
+            self.observability
+                .on_collected_gas_report_fn
+                .as_ref()
+                .map(|callback| GasReportArgs {
+                    callback: callback.clone(),
+                    kind: transaction.kind(),
+                    input: transaction.data().clone(),
+                });
+
+        let contract_decoder = Arc::clone(&self.contract_decoder);
+        let scheduled_blob_params = self.scheduled_blob_params().cloned();
+
+        self.execute_in_block_context(Some(block_spec), |blockchain, block, state| {
+            let state_overrider = StateRefOverrider::new(state_overrides, state.as_ref());
+
+            let block_env = ChainSpecT::BlockEnv::new_block_env(
+                block.block_header(),
+                cfg_env.spec,
+                scheduled_blob_params.as_ref(),
+            );
+            let execution_result = call::run_call::<ChainSpecT, _, _, _>(
+                blockchain,
+                block_env,
+                state_overrider,
+                cfg_env,
+                transaction.clone(),
+                &custom_precompiles,
+                &mut evm_observer,
+            )?;
+
+            let EvmObservedData {
+                address_to_executed_code,
+                call_trace_arena,
+                encoded_console_logs,
+            } = evm_observer.collect_and_report(&execution_result.precompile_addresses)?;
+
+            if let Some(GasReportArgs {
+                callback,
+                kind,
+                input,
+            }) = gas_report_args
+            {
+                let mut contract_decoder = contract_decoder.write();
+                let gas_report = GasReport::new(
+                    state,
+                    &mut contract_decoder,
+                    &execution_result.result,
+                    kind,
+                    input,
+                )?;
+
+                callback(gas_report).map_err(ProviderError::OnCollectedGasReportCallback)?;
+            }
+
+            Ok(CallResultWithMetadata {
+                address_to_executed_code,
+                call_trace_arena,
+                console_log_inputs: encoded_console_logs,
+                execution_result: execution_result.result,
+                precompile_addresses: execution_result.precompile_addresses,
+            })
+        })?
+    }
+
+    fn execute_in_block_context<T>(
+        &mut self,
+        block_spec: Option<&BlockSpec>,
+        function: impl FnOnce(
+            &dyn BlockHashByNumber<Error = DynBlockchainError>,
+            &Arc<ChainSpecT::Block>,
+            &Box<dyn DynState>,
+        ) -> T,
+    ) -> Result<T, ProviderErrorForChainSpec<ChainSpecT>> {
+        let block = if let Some(block_spec) = block_spec {
+            self.block_by_block_spec(block_spec)?
+        } else {
+            Some(self.blockchain.last_block()?)
+        };
+
+        if let Some(block) = block {
+            let block_header = block.block_header();
+            let block_number = block_header.number;
+
+            let contextual_state = self.get_or_compute_state(block_number)?;
+
+            Ok(function(&*self.blockchain, &block, &contextual_state))
+        } else {
+            // Block spec is pending
+            let result = self.mine_pending_block()?;
+
+            let blockchain =
+                BlockchainWithPending::new(&*self.blockchain, result.block_and_state.block);
+
+            let block: Arc<ChainSpecT::Block> = blockchain.last_block().clone().cast_arc_into();
+
+            Ok(function(&blockchain, &block, &result.block_and_state.state))
+        }
+    }
+
+    fn mine_block_with_mem_pool(
+        &mut self,
+        evm_config: &EvmConfig,
+        options: HeaderOverrides<ChainSpecT::Hardfork>,
+        evm_observer: &mut EvmObserver,
+    ) -> Result<
+        MineBlockResultAndStateWithMetadata<
+            <ChainSpecT as GenesisBlockFactory>::LocalBlock,
+            ChainSpecT::HaltReason,
+            EvmObservedData,
+        >,
+        ProviderErrorForChainSpec<ChainSpecT>,
+    > {
+        let reward = miner_reward(self.blockchain.hardfork().into()).unwrap_or(0);
+        let state_to_be_modified = (*self.current_state()?).clone();
+
+        let result = mine_block::<ChainSpecT, _, _>(
+            self.blockchain.as_ref(),
+            &self.block_config,
+            state_to_be_modified,
+            &self.mem_pool,
+            evm_config,
+            options,
+            self.min_gas_price,
+            self.mining_config.mem_pool.order,
+            reward,
+            Some(evm_observer),
+            &self.precompile_overrides,
+        )?;
+
+        Ok(result)
+    }
+
+    /// Mines a block with the provided transaction.
+    fn mine_block_with_single_transaction(
+        &mut self,
+        evm_config: &EvmConfig,
+        options: HeaderOverrides<ChainSpecT::Hardfork>,
+        transaction: ChainSpecT::SignedTransaction,
+        evm_observer: &mut EvmObserver,
+    ) -> Result<
+        MineBlockResultAndStateWithMetadata<
+            <ChainSpecT as GenesisBlockFactory>::LocalBlock,
+            ChainSpecT::HaltReason,
+            EvmObservedData,
+        >,
+        ProviderErrorForChainSpec<ChainSpecT>,
+    > {
+        let reward = miner_reward(self.blockchain.hardfork().into()).unwrap_or(0);
+        let state_to_be_modified = (*self.current_state()?).clone();
+
+        let result = mine_block_with_single_transaction::<ChainSpecT, _, _>(
+            self.blockchain.as_ref(),
+            &self.block_config,
+            state_to_be_modified,
+            transaction,
+            evm_config,
+            options,
+            self.min_gas_price,
+            reward,
+            Some(evm_observer),
+            &self.precompile_overrides,
+        )?;
+
+        let inspector_data = evm_observer.flush_and_report(&result.precompile_addresses)?;
+
+        Ok(MineBlockResultAndStateWithMetadata::new(
+            result,
+            vec![inspector_data],
+        ))
+    }
+}
+
+impl<ChainSpecT, TimerT> ProviderData<ChainSpecT, TimerT>
+where
+    ChainSpecT: SyncProviderSpec<
+        TimerT,
+        SignedTransaction: Default
+                               + TransactionType<Type: IsEip4844>
+                               + TransactionValidation<ValidationError: PartialEq>,
+    >,
+    TimerT: Clone + TimeSinceEpoch,
+{
+    pub fn send_transaction(
+        &mut self,
+        transaction: ChainSpecT::SignedTransaction,
+    ) -> Result<SendTransactionResultForChainSpec<ChainSpecT>, ProviderErrorForChainSpec<ChainSpecT>>
+    {
+        if transaction.transaction_type().is_eip4844() {
+            if !self.is_auto_mining || edr_mem_pool::has_transactions(&self.mem_pool) {
+                return Err(ProviderError::BlobMemPoolUnsupported);
+            }
+
+            let transaction_hash = *transaction.transaction_hash();
+
+            // Despite not adding the transaction to the mempool, we still notify
+            // subscribers
+            self.notify_subscribers_about_pending_transaction(&transaction_hash);
+
+            let result = self.mine_and_commit_block_impl(
+                move |provider, config, options, evm_observer| {
+                    provider.mine_block_with_single_transaction(
+                        config,
+                        options,
+                        transaction,
+                        evm_observer,
+                    )
+                },
+                self.header_overrides(),
+            )?;
+
+            return Ok(SendTransactionResult {
+                transaction_hash,
+                mining_results: vec![result],
+            });
+        }
+
+        let snapshot_id = if self.is_auto_mining {
+            // This check guarantees that the sent transaction is a pending transaction,
+            // meaning it can either be mined immediately or as part of a sequence of
+            // transactions.
+            self.validate_auto_mine_transaction(&transaction)?;
+
+            Some(self.make_snapshot())
+        } else {
+            None
+        };
+
+        let transaction_hash = self
+            .add_pending_transaction(transaction)
+            .inspect_err(|_error| {
+                if let Some(snapshot_id) = snapshot_id {
+                    self.revert_to_snapshot(snapshot_id);
+                }
+            })?;
+
+        // The mempool has a concept of pending and future transactions. Pending
+        // transactions can be mined immediately while future transactions can
+        // be mined once the account's next (pending) nonce becomes high enough.
+        //
+        // If automining, we mine all pending transactions, including the sent
+        // transaction. We need to mine other transactions because it's possible that:
+        //
+        // 1. The user enabled automining after transactions were added to the mempool.
+        // 2. Adding the sent transaction converted future transactions to pending
+        //    transactions.
+        let mut mining_results = Vec::new();
+        snapshot_id
+            .map(
+                |snapshot_id| -> Result<(), ProviderErrorForChainSpec<ChainSpecT>> {
+                    // Mine blocks until the sent transaction is mined. We might need to mine
+                    // multiple block due to the gas limit.
+                    loop {
+                        let result = self
+                            .mine_and_commit_block(self.header_overrides())
+                            .inspect_err(|_error| {
+                                self.revert_to_snapshot(snapshot_id);
+                            })?;
+
+                        let mined_transaction = result.has_transaction(&transaction_hash);
+
+                        mining_results.push(result);
+
+                        if mined_transaction {
+                            break;
+                        }
+                    }
+
+                    // Mine all remaining pending transactions, if any. E.g. this can happen if:
+                    // - the account corresponding to the sent transaction had future transactions
+                    //   that became pending
+                    // - the mine ordering is "priority" and the sent transaction has a higher
+                    //   miner's tip than other pending transactions.
+                    while self.mem_pool.has_pending_transactions() {
+                        let result = self
+                            .mine_and_commit_block(self.header_overrides())
+                            .inspect_err(|_error| {
+                                self.revert_to_snapshot(snapshot_id);
+                            })?;
+
+                        mining_results.push(result);
+                    }
+
+                    self.snapshots.remove(&snapshot_id);
+
+                    Ok(())
+                },
+            )
+            .transpose()?;
+
+        Ok(SendTransactionResult {
+            transaction_hash,
+            mining_results,
+        })
+    }
+}
+
+impl<ChainSpecT, TimerT> ProviderData<ChainSpecT, TimerT>
+where
+    ChainSpecT: SyncProviderSpec<
+        TimerT,
+        SignedTransaction: Default + TransactionValidation<ValidationError: PartialEq>,
+    >,
+    TimerT: Clone + TimeSinceEpoch,
+{
+    #[cfg_attr(feature = "tracing", tracing::instrument(level = "trace", skip(self)))]
+    pub fn debug_trace_transaction(
+        &mut self,
+        transaction_hash: &B256,
+        tracing_options: GethDebugTracingOptions,
+    ) -> Result<DebugTraceResultWithCallTraces, ProviderErrorForChainSpec<ChainSpecT>> {
+        let block = self
+            .blockchain
+            .block_by_transaction_hash(transaction_hash)?
+            .ok_or_else(|| ProviderError::InvalidTransactionHash(*transaction_hash))?;
+
+        let header = block.block_header();
+
+        let cfg_env = self.create_evm_config_at_block_spec(&BlockSpec::Number(header.number))?;
+
+        let transactions =
+            self.filter_unsupported_transaction_types(block.transactions(), transaction_hash)?;
+
+        let prev_block_number = block.block_header().number - 1;
+        let prev_block_spec = Some(BlockSpec::Number(prev_block_number));
+        let observer_config = EvmObserverConfig {
+            call_override: None,
+            ..EvmObserverConfig::new(&self.observability, self.contract_decoder.clone())
+        };
+
+        let scheduled_blob_params = self.scheduled_blob_params().cloned();
+        self.execute_in_block_context(
+            prev_block_spec.as_ref(),
+            |blockchain, _prev_block, state| {
+                let block_env = ChainSpecT::BlockEnv::new_block_env(
+                    header,
+                    cfg_env.spec,
+                    scheduled_blob_params.as_ref(),
+                );
+
+                debug_trace_transaction::<ChainSpecT>(
+                    blockchain,
+                    state.clone(),
+                    cfg_env,
+                    tracing_options,
+                    block_env,
+                    transactions,
+                    transaction_hash,
+                    observer_config,
+                )
+                .map_err(ProviderError::DebugTrace)
+            },
+        )?
+    }
+
+    /// Filters out transactions with unsupported types and returns the
+    /// remaining transactions, if skipping is allowed. Otherwise returns
+    /// an error.
+    fn filter_unsupported_transaction_types(
+        &self,
+        transactions: &[ChainSpecT::SignedTransaction],
+        transaction_hash: &B256,
+    ) -> Result<Vec<ChainSpecT::SignedTransaction>, ProviderErrorForChainSpec<ChainSpecT>> {
+        transactions
+            .iter()
+            .filter_map(|transaction| {
+                if transaction.is_supported_transaction() {
+                    Some(Ok(transaction.clone()))
+                } else if *transaction.transaction_hash() == *transaction_hash {
+                    Some(Err(
+                        ProviderError::UnsupportedTransactionTypeForDebugTrace {
+                            transaction_hash: *transaction_hash,
+                            unsupported_transaction_type: transaction.transaction_type().into(),
+                        },
+                    ))
+                } else if self.skip_unsupported_transaction_types {
+                    None
+                } else {
+                    Some(Err(ProviderError::UnsupportedTransactionTypeInDebugTrace {
+                        requested_transaction_hash: *transaction_hash,
+                        unsupported_transaction_hash: *transaction.transaction_hash(),
+                        unsupported_transaction_type: transaction.transaction_type().into(),
+                    }))
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()
+    }
+}
+
+impl<ChainSpecT, TimerT> ProviderData<ChainSpecT, TimerT>
+where
+    ChainSpecT: SyncProviderSpec<
+        TimerT,
+        SignedTransaction: Default
+                               + TransactionMut
+                               + TransactionValidation<ValidationError: PartialEq>,
+    >,
+    TimerT: Clone + TimeSinceEpoch,
+{
+    /// Estimate the gas cost of a transaction. Matches Hardhat behavior.
+    pub fn estimate_gas(
+        &mut self,
+        transaction: ChainSpecT::SignedTransaction,
+        block_spec: &BlockSpec,
+    ) -> Result<EstimateGasResult, ProviderErrorForChainSpec<ChainSpecT>> {
+        let cfg_env = self.create_evm_config_at_block_spec(block_spec)?;
+        // Minimum gas cost that is required for transaction to be included in
+        // a block
+        let minimum_cost =
+            transaction::calculate_initial_tx_gas_for_tx(&transaction, self.evm_spec_id())
+                .initial_gas;
+
+        let custom_precompiles = self.precompile_overrides.clone();
+        let observer_config =
+            EvmObserverConfig::new(&self.observability, self.contract_decoder.clone());
+
+        let mut evm_observer = EvmObserver::new(observer_config.clone());
+        let contract_decoder = Arc::clone(&self.contract_decoder);
+        let scheduled_blob_params = self.scheduled_blob_params().cloned();
+
+        let include_call_traces = self.observability.include_call_traces;
+
+        self.execute_in_block_context(Some(block_spec), |blockchain, block, state| {
+            let header = block.block_header();
+
+            // Measure the gas used by the transaction with optional limit from call request
+            // defaulting to block limit. Report errors from initial call as if from
+            // `eth_call`.
+            let block_env = ChainSpecT::BlockEnv::new_block_env(
+                block.block_header(),
+                cfg_env.spec,
+                scheduled_blob_params.as_ref(),
+            );
+            let result = call::run_call::<'_, ChainSpecT, _, _, _>(
+                blockchain,
+                block_env,
+                state,
+                cfg_env.clone(),
+                transaction.clone(),
+                &custom_precompiles,
+                &mut evm_observer,
+            )?;
+
+            let EvmObservedData {
+                address_to_executed_code,
+                call_trace_arena,
+                encoded_console_logs,
+            } = evm_observer.collect_and_report(&result.precompile_addresses)?;
+
+            let mut initial_estimation = match result.result {
+                ExecutionResult::Success { gas_used, .. } => Ok(gas_used),
+                ExecutionResult::Revert { output, .. } => Err(TransactionFailure::revert(
+                    output,
+                    None,
+                    &address_to_executed_code,
+                    &call_trace_arena,
+                    contract_decoder.as_ref(),
+                )),
+                ExecutionResult::Halt { reason, .. } => Err(TransactionFailure::halt(
+                    ChainSpecT::cast_halt_reason(reason),
+                    None,
+                    &address_to_executed_code,
+                    &call_trace_arena,
+                    contract_decoder.as_ref(),
+                )),
+            }
+            .map_err(|transaction_failure| {
+                Box::new(EstimateGasFailure {
+                    address_to_executed_code,
+                    call_trace_arena: call_trace_arena.clone(),
+                    encoded_console_logs,
+                    precompile_addresses: result.precompile_addresses,
+                    transaction_failure,
+                })
+            })?;
+
+            let mut call_trace_arenas = if include_call_traces == IncludeTraces::All {
+                vec![call_trace_arena]
+            } else {
+                Vec::new()
+            };
+
+            // Ensure that the initial estimation is at least the minimum cost + 1.
+            if initial_estimation <= minimum_cost {
+                initial_estimation = minimum_cost + 1;
+            }
+
+            // Create a new observer for the check
+            let mut evm_observer = EvmObserver::new(observer_config.clone());
+
+            // Test if the transaction would be successful with the initial estimation
+            let CheckGasLimitResult {
+                success,
+                precompile_addresses,
+            } = gas::check_gas_limit::<ChainSpecT>(CheckGasLimitArgs {
+                blockchain,
+                header,
+                state,
+                cfg_env: cfg_env.clone(),
+                transaction: transaction.clone(),
+                gas_limit: initial_estimation,
+                custom_precompiles: &custom_precompiles,
+                observer: &mut evm_observer,
+                scheduled_blob_params: scheduled_blob_params.as_ref(),
+            })?;
+
+            let EvmObservedData {
+                address_to_executed_code: _,
+                call_trace_arena,
+                encoded_console_logs: _,
+            } = evm_observer.collect_and_report(&precompile_addresses)?;
+
+            if include_call_traces.should_include(|| !success) {
+                call_trace_arenas.push(call_trace_arena);
+            }
+
+            // Return the initial estimation if it was successful
+            if success {
+                return Ok(EstimateGasResult {
+                    estimation: initial_estimation,
+                    call_trace_arenas,
+                });
+            }
+
+            // Correct the initial estimation if the transaction failed with the actually
+            // used gas limit. This can happen if the execution logic is based
+            // on the available gas.
+            let EstimateGasResult {
+                call_trace_arenas: estimation_call_trace_arenas,
+                estimation,
+            } = gas::binary_search_estimation::<ChainSpecT>(BinarySearchEstimationArgs {
+                blockchain,
+                header,
+                state,
+                cfg_env: cfg_env.clone(),
+                transaction,
+                lower_bound: initial_estimation,
+                upper_bound: header.gas_limit,
+                custom_precompiles: &custom_precompiles,
+                observer_config,
+                scheduled_blob_params: scheduled_blob_params.as_ref(),
+            })?;
+
+            call_trace_arenas.extend(estimation_call_trace_arenas);
+
+            Ok(EstimateGasResult {
+                call_trace_arenas,
+                estimation,
+            })
+        })?
     }
 }
 
@@ -2573,10 +2890,10 @@ impl StateId {
     }
 }
 
-fn block_time_offset_seconds(
-    config: &ProviderConfig,
-    timer: &impl TimeSinceEpoch,
-) -> Result<i64, CreationError> {
+fn block_time_offset_seconds<ChainSpecT: ProviderChainSpec, TimerT: TimeSinceEpoch>(
+    config: &ProviderConfig<ChainSpecT::Hardfork>,
+    timer: &TimerT,
+) -> Result<i64, CreationErrorForChainSpec<ChainSpecT>> {
     config.initial_date.map_or(Ok(0), |initial_date| {
         let initial_timestamp = i64::try_from(
             initial_date
@@ -2593,372 +2910,361 @@ fn block_time_offset_seconds(
     })
 }
 
-struct BlockchainAndState {
-    blockchain: Box<dyn SyncBlockchain<L1ChainSpec, BlockchainError, StateError>>,
+struct BlockchainAndState<ChainSpecT: BlockChainSpec> {
+    blockchain: Box<dyn SyncBlockchainForChainSpec<ChainSpecT>>,
+    block_config: BlockConfig<ChainSpecT::Hardfork>,
     fork_metadata: Option<ForkMetadata>,
-    rpc_client: Option<Arc<EthRpcClient<L1ChainSpec>>>,
-    state: Box<dyn SyncState<StateError>>,
+    rpc_client: Option<Arc<EthRpcClientForChainSpec<ChainSpecT>>>,
+    state: Box<dyn DynState>,
     irregular_state: IrregularState,
     prev_randao_generator: RandomHashGenerator,
     block_time_offset_seconds: i64,
-    next_block_base_fee_per_gas: Option<U256>,
+    next_block_base_fee_per_gas: Option<u128>,
 }
 
-fn create_blockchain_and_state(
+fn create_forked_blockchain_and_state<
+    ChainSpecT: SyncProviderSpec<TimerT>,
+    TimerT: Clone + TimeSinceEpoch,
+>(
     runtime: runtime::Handle,
-    config: &ProviderConfig,
-    timer: &impl TimeSinceEpoch,
-    mut genesis_accounts: HashMap<Address, Account>,
-) -> Result<BlockchainAndState, CreationError> {
-    let mut prev_randao_generator = RandomHashGenerator::with_seed(edr_defaults::MIX_HASH_SEED);
+    config: &ProviderConfig<ChainSpecT::Hardfork>,
+    timer: &TimerT,
+    fork_config: &ForkConfig<ChainSpecT::Hardfork>,
+) -> Result<BlockchainAndState<ChainSpecT>, CreationErrorForChainSpec<ChainSpecT>> {
+    let prev_randao_generator = RandomHashGenerator::with_seed(edr_defaults::MIX_HASH_SEED);
 
-    if let Some(fork_config) = &config.fork {
-        let state_root_generator = Arc::new(parking_lot::Mutex::new(
-            RandomHashGenerator::with_seed(edr_defaults::STATE_ROOT_HASH_SEED),
-        ));
+    let state_root_generator = Arc::new(parking_lot::Mutex::new(RandomHashGenerator::with_seed(
+        edr_defaults::STATE_ROOT_HASH_SEED,
+    )));
 
-        let http_headers = fork_config
-            .http_headers
-            .as_ref()
-            .map(|headers| HeaderMap::try_from(headers).map_err(CreationError::InvalidHttpHeaders))
-            .transpose()?;
+    let http_headers = fork_config
+        .http_headers
+        .as_ref()
+        .map(|headers| HeaderMap::try_from(headers).map_err(CreationError::InvalidHttpHeaders))
+        .transpose()?;
 
-        let rpc_client = Arc::new(EthRpcClient::<L1ChainSpec>::new(
-            &fork_config.json_rpc_url,
-            config.cache_dir.clone(),
-            http_headers.clone(),
-        )?);
+    let rpc_client = Arc::new(EthRpcClient::<
+        ChainSpecT,
+        ChainSpecT::RpcReceipt,
+        ChainSpecT::RpcTransaction,
+    >::new(
+        &fork_config.url,
+        fork_config.cache_dir.clone(),
+        http_headers.clone(),
+    )?);
 
-        let (blockchain, mut irregular_state) =
-            tokio::task::block_in_place(|| -> Result<_, ForkedCreationError> {
-                let mut irregular_state = IrregularState::default();
-                let blockchain = runtime.block_on(ForkedBlockchain::<L1ChainSpec>::new(
-                    runtime.clone(),
-                    Some(config.chain_id),
-                    config.hardfork,
-                    rpc_client.clone(),
-                    fork_config.block_number,
-                    &mut irregular_state,
-                    state_root_generator.clone(),
-                    &config.chains,
-                ))?;
-
-                Ok((blockchain, irregular_state))
-            })?;
-
-        let fork_block_number = blockchain.last_block_number();
-
-        if !genesis_accounts.is_empty() {
-            let genesis_addresses = genesis_accounts.keys().cloned().collect::<Vec<_>>();
-            let genesis_account_infos = tokio::task::block_in_place(|| {
-                runtime.block_on(rpc_client.get_account_infos(
-                    &genesis_addresses,
-                    Some(BlockSpec::Number(fork_block_number)),
-                ))
-            })?;
-
-            // Make sure that the nonce and the code of genesis accounts matches the fork
-            // state as we only want to overwrite the balance.
-            for (address, account_info) in genesis_addresses.into_iter().zip(genesis_account_infos)
-            {
-                genesis_accounts.entry(address).and_modify(|account| {
-                    let AccountInfo {
-                        balance: _,
-                        nonce,
-                        code,
-                        code_hash,
-                    } = &mut account.info;
-
-                    *nonce = account_info.nonce;
-                    *code = account_info.code;
-                    *code_hash = account_info.code_hash;
-                });
-            }
-
-            irregular_state
-                .state_override_at_block_number(fork_block_number)
-                .and_modify(|state_override| {
-                    // No need to update the state_root, as it could only have been created by the
-                    // `ForkedBlockchain` constructor.
-                    state_override.diff.apply_diff(genesis_accounts.clone());
-                })
-                .or_insert_with(|| {
-                    let state_root = state_root_generator.lock().next_value();
-
-                    StateOverride {
-                        diff: StateDiff::from(genesis_accounts),
-                        state_root,
-                    }
-                });
-        }
-
-        let state = blockchain
-            .state_at_block_number(fork_block_number, irregular_state.state_overrides())
-            .expect("Fork state must exist");
-
-        let block_time_offset_seconds = {
-            let fork_block_timestamp = UNIX_EPOCH
-                + Duration::from_secs(
-                    blockchain
-                        .last_block()
-                        .map_err(CreationError::Blockchain)?
-                        .header()
-                        .timestamp,
-                );
-
-            let elapsed = match timer.since(fork_block_timestamp) {
-                Ok(elapsed) => -i128::from(elapsed),
-                Err(forward_drift) => i128::from(forward_drift.duration().as_secs()),
-            };
-
-            elapsed
-                .try_into()
-                .expect("Elapsed time since fork block must be representable as i64")
-        };
-
-        let next_block_base_fee_per_gas = if config.hardfork >= SpecId::LONDON {
-            if let Some(base_fee) = config.initial_base_fee_per_gas {
-                Some(base_fee)
-            } else {
-                let previous_base_fee = blockchain
-                    .last_block()
-                    .map_err(CreationError::Blockchain)?
-                    .header()
-                    .base_fee_per_gas;
-
-                if previous_base_fee.is_none() {
-                    Some(U256::from(DEFAULT_INITIAL_BASE_FEE_PER_GAS))
-                } else {
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        Ok(BlockchainAndState {
-            fork_metadata: Some(ForkMetadata {
-                chain_id: blockchain.remote_chain_id(),
-                fork_block_number,
-                fork_block_hash: *blockchain
-                    .block_by_number(fork_block_number)
-                    .map_err(CreationError::Blockchain)?
-                    .expect("Fork block must exist")
-                    .hash(),
-            }),
-            rpc_client: Some(rpc_client),
-            blockchain: Box::new(blockchain),
-            state: Box::new(state),
-            irregular_state,
-            prev_randao_generator,
-            block_time_offset_seconds,
-            next_block_base_fee_per_gas,
-        })
-    } else {
-        let mix_hash = if config.hardfork >= SpecId::MERGE {
-            Some(prev_randao_generator.generate_next())
-        } else {
-            None
-        };
-
-        let blockchain = LocalBlockchain::new(
-            StateDiff::from(genesis_accounts),
-            config.chain_id,
-            config.hardfork,
-            GenesisBlockOptions {
-                gas_limit: Some(config.block_gas_limit.get()),
-                timestamp: config.initial_date.map(|d| {
-                    d.duration_since(UNIX_EPOCH)
-                        .expect("initial date must be after UNIX epoch")
-                        .as_secs()
-                }),
-                mix_hash,
-                base_fee: config.initial_base_fee_per_gas,
-                blob_gas: config.initial_blob_gas.clone(),
-            },
-        )?;
-
-        let irregular_state = IrregularState::default();
-        let state = blockchain
-            .state_at_block_number(0, irregular_state.state_overrides())
-            .expect("Genesis state must exist");
-
-        let block_time_offset_seconds = block_time_offset_seconds(config, timer)?;
-
-        Ok(BlockchainAndState {
-            fork_metadata: None,
-            rpc_client: None,
-            blockchain: Box::new(blockchain),
-            state,
-            irregular_state,
-            block_time_offset_seconds,
-            prev_randao_generator,
-            // For local blockchain the initial base fee per gas config option is incorporated as
-            // part of the genesis block.
-            next_block_base_fee_per_gas: None,
-        })
+    let mut chain_configs = ChainSpecT::chain_configs().clone();
+    for (chain_id, chain_override) in fork_config.chain_overrides.iter() {
+        chain_configs
+            .entry(*chain_id)
+            .and_modify(|chain_config| chain_config.apply_override(chain_override))
+            .or_insert_with(|| ChainConfig {
+                name: chain_override.name.clone(),
+                hardfork_activations: chain_override
+                    .hardfork_activation_overrides
+                    .clone()
+                    .unwrap_or_default(),
+                base_fee_params: config
+                    .base_fee_params
+                    .clone()
+                    .unwrap_or_else(|| ChainSpecT::default_base_fee_params().clone()),
+                bpo_hardfork_schedule: None,
+            });
     }
-}
 
-/// The result returned by requesting a transaction.
-#[derive(Debug, Clone)]
-pub struct TransactionAndBlock {
-    /// The transaction.
-    pub transaction: transaction::Signed,
-    /// Block data in which the transaction is found if it has been mined.
-    pub block_data: Option<BlockDataForTransaction>,
-    /// Whether the transaction is pending
-    pub is_pending: bool,
-}
+    let scheduled_blob_params = chain_configs
+        .get(&config.chain_id)
+        .and_then(|chain_config| chain_config.bpo_hardfork_schedule.clone());
 
-/// Block metadata for a transaction.
-#[derive(Debug, Clone)]
-pub struct BlockDataForTransaction {
-    pub block: Arc<dyn SyncBlock<L1ChainSpec, Error = BlockchainError>>,
-    pub transaction_index: u64,
-}
+    let base_fee_params = config.base_fee_params.clone().unwrap_or_else(|| {
+        chain_configs.get(&config.chain_id).cloned().map_or_else(
+            || ChainSpecT::default_base_fee_params().clone(),
+            |chain_config| chain_config.base_fee_params,
+        )
+    });
 
-#[cfg(test)]
-pub(crate) mod test_utils {
-    use std::convert::Infallible;
-
-    use anyhow::anyhow;
-    use edr_eth::transaction::{self, TxKind};
-
-    use super::*;
-    use crate::{
-        test_utils::{create_test_config_with_fork, one_ether, FORK_BLOCK_NUMBER},
-        NoopLogger, ProviderConfig,
+    let block_config = BlockConfig {
+        base_fee_params,
+        hardfork: config.hardfork,
+        min_ethash_difficulty: ChainSpecT::MIN_ETHASH_DIFFICULTY,
+        scheduled_blob_params,
     };
 
-    pub(crate) struct ProviderTestFixture {
-        _runtime: runtime::Runtime,
-        pub config: ProviderConfig,
-        pub provider_data: ProviderData<Infallible>,
-        pub impersonated_account: Address,
-    }
+    let (blockchain, mut irregular_state) =
+        tokio::task::block_in_place(|| -> Result<_, ForkedCreationError<ChainSpecT::Hardfork>> {
+            let mut irregular_state = IrregularState::default();
+            let blockchain = runtime.block_on(ForkedBlockchainForChainSpec::<ChainSpecT>::new(
+                block_config.hardfork,
+                runtime.clone(),
+                rpc_client.clone(),
+                &mut irregular_state,
+                state_root_generator.clone(),
+                &chain_configs,
+                fork_config.block_number,
+                Some(config.chain_id),
+            ))?;
 
-    impl ProviderTestFixture {
-        pub(crate) fn new_local() -> anyhow::Result<Self> {
-            Self::with_fork(None)
-        }
+            Ok((blockchain, irregular_state))
+        })?;
 
-        #[cfg(feature = "test-remote")]
-        pub(crate) fn new_forked(url: Option<String>) -> anyhow::Result<Self> {
-            use edr_test_utils::env::get_alchemy_url;
+    let fork_block_number = blockchain.last_block_number();
 
-            let fork_url = url.unwrap_or(get_alchemy_url());
-            Self::with_fork(Some(fork_url))
-        }
+    if !config.genesis_state.is_empty() {
+        let genesis_addresses = config.genesis_state.keys().cloned().collect::<Vec<_>>();
+        let genesis_account_infos = tokio::task::block_in_place(|| {
+            runtime.block_on(rpc_client.get_account_infos(
+                &genesis_addresses,
+                Some(BlockSpec::Number(fork_block_number)),
+            ))
+        })?;
 
-        fn with_fork(fork: Option<String>) -> anyhow::Result<Self> {
-            let fork = fork.map(|json_rpc_url| {
-                ForkConfig {
-                    json_rpc_url,
-                    // Random recent block for better cache consistency
-                    block_number: Some(FORK_BLOCK_NUMBER),
-                    http_headers: None,
+        let genesis_state: HashMap<Address, Account> = config
+            .genesis_state
+            .iter()
+            .zip(genesis_account_infos)
+            .map(|((address, account_override), remote_account)| {
+                let (code, code_hash) = account_override.code.as_ref().map_or(
+                    (remote_account.code, remote_account.code_hash),
+                    |code| {
+                        let code_hash = code.hash_slow();
+                        (Some(code.clone()), code_hash)
+                    },
+                );
+
+                let info = AccountInfo {
+                    balance: account_override.balance.unwrap_or(remote_account.balance),
+                    nonce: account_override.nonce.unwrap_or(remote_account.nonce),
+                    code_hash,
+                    code,
+                };
+
+                // TODO: Add support for overriding the storage
+                // TODO: https://github.com/NomicFoundation/edr/issues/911
+                if account_override.storage.is_some() {
+                    return Err(ForkedCreationError::StorageOverridesUnsupported);
+                }
+
+                let account = Account {
+                    info,
+                    // TODO: Add support for overriding the storage
+                    // TODO: https://github.com/NomicFoundation/edr/issues/911
+                    storage: HashMap::default(),
+                    status: AccountStatus::Created | AccountStatus::Touched,
+                    transaction_id: 0,
+                };
+
+                Ok((*address, account))
+            })
+            .collect::<Result<_, _>>()?;
+
+        irregular_state
+            .state_override_at_block_number(fork_block_number)
+            .and_modify(|state_override| {
+                // No need to update the state_root, as it could only have been created by the
+                // `ForkedBlockchain` constructor.
+                state_override.diff.apply_diff(genesis_state.clone());
+            })
+            .or_insert_with(|| {
+                let state_root = state_root_generator.lock().next_value();
+
+                StateOverride {
+                    diff: StateDiff::from(genesis_state),
+                    state_root,
                 }
             });
+    }
 
-            let config = create_test_config_with_fork(fork);
+    let state = blockchain
+        .state_at_block_number(fork_block_number, irregular_state.state_overrides())
+        .expect("Fork state must exist");
 
-            let runtime = runtime::Builder::new_multi_thread()
-                .worker_threads(1)
-                .enable_all()
-                .thread_name("provider-data-test")
-                .build()?;
-
-            Self::new(runtime, config)
-        }
-
-        pub fn new(
-            runtime: tokio::runtime::Runtime,
-            mut config: ProviderConfig,
-        ) -> anyhow::Result<Self> {
-            let logger = Box::<NoopLogger>::default();
-            let subscription_callback_noop = Box::new(|_| ());
-
-            let impersonated_account = Address::random();
-            config.genesis_accounts.insert(
-                impersonated_account,
-                AccountInfo {
-                    balance: one_ether(),
-                    nonce: 0,
-                    code: None,
-                    code_hash: KECCAK_EMPTY,
-                },
+    let block_time_offset_seconds = {
+        let fork_block_timestamp = UNIX_EPOCH
+            + Duration::from_secs(
+                blockchain
+                    .last_block()
+                    .map_err(DynBlockchainError::new)?
+                    .block_header()
+                    .timestamp,
             );
 
-            let mut provider_data = ProviderData::new(
-                runtime.handle().clone(),
-                logger,
-                subscription_callback_noop,
-                None,
-                config.clone(),
-                Arc::<ContractDecoder>::default(),
-                CurrentTime,
-            )?;
+        let elapsed = match timer.since(fork_block_timestamp) {
+            Ok(elapsed) => -i128::from(elapsed),
+            Err(forward_drift) => i128::from(forward_drift.duration().as_secs()),
+        };
 
-            provider_data.impersonate_account(impersonated_account);
+        elapsed
+            .try_into()
+            .expect("Elapsed time since fork block must be representable as i64")
+    };
 
-            Ok(Self {
-                _runtime: runtime,
-                config,
-                provider_data,
-                impersonated_account,
+    let next_block_base_fee_per_gas = if config.hardfork.into() >= EvmSpecId::LONDON {
+        if let Some(base_fee) = config.initial_base_fee_per_gas {
+            Some(base_fee)
+        } else {
+            let previous_base_fee = blockchain
+                .last_block()
+                .map_err(DynBlockchainError::new)?
+                .block_header()
+                .base_fee_per_gas;
+
+            if previous_base_fee.is_none() {
+                Some(DEFAULT_INITIAL_BASE_FEE_PER_GAS)
+            } else {
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    Ok(BlockchainAndState {
+        fork_metadata: Some(ForkMetadata {
+            chain_id: blockchain.remote_chain_id(),
+            fork_block_number,
+            fork_block_hash: *blockchain
+                .block_by_number(fork_block_number)
+                .map_err(DynBlockchainError::new)?
+                .expect("Fork block must exist")
+                .block_hash(),
+        }),
+        rpc_client: Some(rpc_client),
+        blockchain: Box::new(DynBlockchain::new(blockchain)),
+        block_config,
+        state: Box::new(state),
+        irregular_state,
+        prev_randao_generator,
+        block_time_offset_seconds,
+        next_block_base_fee_per_gas,
+    })
+}
+
+fn create_local_blockchain_and_state<
+    ChainSpecT: SyncProviderSpec<TimerT>,
+    TimerT: Clone + TimeSinceEpoch,
+>(
+    config: &ProviderConfig<ChainSpecT::Hardfork>,
+    timer: &TimerT,
+) -> Result<BlockchainAndState<ChainSpecT>, CreationErrorForChainSpec<ChainSpecT>> {
+    let mut prev_randao_generator = RandomHashGenerator::with_seed(edr_defaults::MIX_HASH_SEED);
+    let mix_hash = if config.hardfork.into() >= EvmSpecId::MERGE {
+        Some(prev_randao_generator.generate_next())
+    } else {
+        None
+    };
+
+    let genesis_state: HashMap<Address, Account> = config
+        .genesis_state
+        .iter()
+        .map(|(address, account_override)| {
+            let code_hash = account_override
+                .code
+                .as_ref()
+                .map_or(KECCAK_EMPTY, Bytecode::hash_slow);
+
+            let info = AccountInfo {
+                balance: account_override.balance.unwrap_or(U256::ZERO),
+                nonce: account_override.nonce.unwrap_or(0),
+                code_hash,
+                code: account_override.code.clone(),
+            };
+
+            let account = Account {
+                info,
+                storage: account_override
+                    .storage
+                    .clone()
+                    .unwrap_or(HashMap::default()),
+                status: AccountStatus::Created | AccountStatus::Touched,
+                transaction_id: 0,
+            };
+
+            (*address, account)
+        })
+        .collect();
+
+    let base_fee_params = config.base_fee_params.as_ref().unwrap_or_else(|| {
+        ChainSpecT::chain_configs()
+            .get(&config.chain_id)
+            .map_or_else(ChainSpecT::default_base_fee_params, |chain_config| {
+                &chain_config.base_fee_params
             })
-        }
+    });
 
-        pub fn dummy_transaction_request(
-            &self,
-            local_account_index: usize,
-            gas_limit: u64,
-            nonce: Option<u64>,
-        ) -> anyhow::Result<TransactionRequestAndSender> {
-            let request = transaction::Request::Eip155(transaction::request::Eip155 {
-                kind: TxKind::Call(Address::ZERO),
-                gas_limit,
-                gas_price: U256::from(42_000_000_000_u64),
-                value: U256::from(1),
-                input: Bytes::default(),
-                nonce: nonce.unwrap_or(0),
-                chain_id: self.config.chain_id,
-            });
+    let scheduled_blob_params = ChainSpecT::chain_configs()
+        .get(&config.chain_id)
+        .and_then(|config| config.bpo_hardfork_schedule.clone());
 
-            let sender = self.nth_local_account(local_account_index)?;
-            Ok(TransactionRequestAndSender { request, sender })
-        }
+    let block_config = BlockConfig {
+        base_fee_params: base_fee_params.clone(),
+        hardfork: config.hardfork,
+        min_ethash_difficulty: ChainSpecT::MIN_ETHASH_DIFFICULTY,
+        scheduled_blob_params,
+    };
 
-        /// Retrieves the nth local account.
-        ///
-        /// # Panics
-        ///
-        /// Panics if there are not enough local accounts
-        pub fn nth_local_account(&self, index: usize) -> anyhow::Result<Address> {
-            self.provider_data
-                .local_accounts
-                .keys()
-                .nth(index)
-                .copied()
-                .ok_or(anyhow!("the requested local account does not exist"))
-        }
+    let genesis_diff = StateDiff::from(genesis_state);
+    let genesis_block = ChainSpecT::genesis_block(
+        genesis_diff.clone(),
+        &block_config,
+        GenesisBlockOptions {
+            extra_data: None,
+            withdrawals_root: None,
+            gas_limit: Some(config.block_gas_limit.get()),
+            timestamp: config.initial_date.map(|d| {
+                d.duration_since(UNIX_EPOCH)
+                    .expect("initial date must be after UNIX epoch")
+                    .as_secs()
+            }),
+            mix_hash,
+            base_fee: config.initial_base_fee_per_gas,
+            base_fee_params: config.base_fee_params.clone(),
+            blob_gas: config.initial_blob_gas.clone(),
+        },
+    )
+    .map_err(CreationError::LocalBlockchainCreation)?;
 
-        pub fn impersonated_dummy_transaction(&self) -> anyhow::Result<transaction::Signed> {
-            let mut transaction = self.dummy_transaction_request(0, 30_000, None)?;
-            transaction.sender = self.impersonated_account;
+    let blockchain = LocalBlockchainForChainSpec::<ChainSpecT>::new(
+        genesis_block,
+        genesis_diff,
+        config.chain_id,
+        block_config.hardfork,
+    )
+    .map_err(CreationError::InvalidGenesisBlock)?;
 
-            Ok(self.provider_data.sign_transaction_request(transaction)?)
-        }
+    let irregular_state = IrregularState::default();
+    let state = blockchain
+        .state_at_block_number(0, irregular_state.state_overrides())
+        .expect("Genesis state must exist");
 
-        pub fn signed_dummy_transaction(
-            &self,
-            local_account_index: usize,
-            nonce: Option<u64>,
-        ) -> anyhow::Result<transaction::Signed> {
-            let transaction = self.dummy_transaction_request(local_account_index, 30_000, nonce)?;
-            Ok(self.provider_data.sign_transaction_request(transaction)?)
-        }
+    let block_time_offset_seconds = block_time_offset_seconds::<ChainSpecT, TimerT>(config, timer)?;
+
+    Ok(BlockchainAndState {
+        fork_metadata: None,
+        rpc_client: None,
+        blockchain: Box::new(DynBlockchain::new(blockchain)),
+        block_config,
+        state,
+        irregular_state,
+        block_time_offset_seconds,
+        prev_randao_generator,
+        // For local blockchain the initial base fee per gas config option is incorporated as
+        // part of the genesis block.
+        next_block_base_fee_per_gas: None,
+    })
+}
+
+fn create_blockchain_and_state<
+    ChainSpecT: SyncProviderSpec<TimerT>,
+    TimerT: Clone + TimeSinceEpoch,
+>(
+    runtime: runtime::Handle,
+    config: &ProviderConfig<ChainSpecT::Hardfork>,
+    timer: &TimerT,
+) -> Result<BlockchainAndState<ChainSpecT>, CreationErrorForChainSpec<ChainSpecT>> {
+    if let Some(fork_config) = &config.fork {
+        create_forked_blockchain_and_state(runtime, config, timer, fork_config)
+    } else {
+        create_local_blockchain_and_state(config, timer)
     }
 }
 
@@ -2967,7 +3273,10 @@ fn get_skip_unsupported_transaction_types_from_env() -> bool {
         .map_or(DEFAULT_SKIP_UNSUPPORTED_TRANSACTION_TYPES, |s| s == "true")
 }
 
-fn get_max_cached_states_from_env() -> Result<NonZeroUsize, CreationError> {
+fn get_max_cached_states_from_env<
+    ChainSpecT: ProviderSpec<TimerT>,
+    TimerT: Clone + TimeSinceEpoch,
+>() -> Result<NonZeroUsize, CreationErrorForChainSpec<ChainSpecT>> {
     std::env::var(EDR_MAX_CACHED_STATES_ENV_VAR).map_or_else(
         |err| match err {
             std::env::VarError::NotPresent => {
@@ -2984,23 +3293,22 @@ fn get_max_cached_states_from_env() -> Result<NonZeroUsize, CreationError> {
 
 #[cfg(test)]
 mod tests {
-    use std::convert::Infallible;
-
     use anyhow::Context;
-    use edr_eth::transaction::SignedTransaction;
-    use edr_evm::{hex, MineOrdering};
+    use edr_block_miner::MineOrdering;
+    use edr_chain_l1::L1ChainSpec;
+    use edr_primitives::hex;
     use serde_json::json;
 
-    use super::{test_utils::ProviderTestFixture, *};
+    use super::*;
     use crate::{
         console_log::tests::{deploy_console_log_contract, ConsoleLogTransaction},
-        test_utils::{create_test_config, one_ether},
+        test_utils::{create_test_config, one_ether, ProviderTestFixture},
         MemPoolConfig, MiningConfig, ProviderConfig,
     };
 
     #[test]
     fn test_local_account_balance() -> anyhow::Result<()> {
-        let mut fixture = ProviderTestFixture::new_local()?;
+        let mut fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
 
         let account = *fixture
             .provider_data
@@ -3022,7 +3330,7 @@ mod tests {
     #[cfg(feature = "test-remote")]
     #[test]
     fn test_local_account_balance_forked() -> anyhow::Result<()> {
-        let mut fixture = ProviderTestFixture::new_forked(None)?;
+        let mut fixture = ProviderTestFixture::<L1ChainSpec>::new_forked(None)?;
 
         let account = *fixture
             .provider_data
@@ -3043,7 +3351,7 @@ mod tests {
 
     #[test]
     fn test_sign_transaction_request() -> anyhow::Result<()> {
-        let fixture = ProviderTestFixture::new_local()?;
+        let fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
 
         let transaction = fixture.signed_dummy_transaction(0, None)?;
         let recovered_address = transaction.caller();
@@ -3058,7 +3366,7 @@ mod tests {
 
     #[test]
     fn test_sign_transaction_request_impersonated_account() -> anyhow::Result<()> {
-        let fixture = ProviderTestFixture::new_local()?;
+        let fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
 
         let transaction = fixture.impersonated_dummy_transaction()?;
 
@@ -3068,8 +3376,8 @@ mod tests {
     }
 
     fn test_add_pending_transaction(
-        fixture: &mut ProviderTestFixture,
-        transaction: transaction::Signed,
+        fixture: &mut ProviderTestFixture<L1ChainSpec>,
+        transaction: edr_chain_l1::L1SignedTransaction,
     ) -> anyhow::Result<()> {
         let filter_id = fixture
             .provider_data
@@ -3101,7 +3409,7 @@ mod tests {
 
     #[test]
     fn add_pending_transaction() -> anyhow::Result<()> {
-        let mut fixture = ProviderTestFixture::new_local()?;
+        let mut fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
         let transaction = fixture.signed_dummy_transaction(0, None)?;
 
         test_add_pending_transaction(&mut fixture, transaction)
@@ -3109,7 +3417,7 @@ mod tests {
 
     #[test]
     fn add_pending_transaction_from_impersonated_account() -> anyhow::Result<()> {
-        let mut fixture = ProviderTestFixture::new_local()?;
+        let mut fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
         let transaction = fixture.impersonated_dummy_transaction()?;
 
         test_add_pending_transaction(&mut fixture, transaction)
@@ -3117,7 +3425,7 @@ mod tests {
 
     #[test]
     fn block_by_block_spec_earliest() -> anyhow::Result<()> {
-        let fixture = ProviderTestFixture::new_local()?;
+        let fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
 
         let block_spec = BlockSpec::Tag(BlockTag::Earliest);
 
@@ -3126,19 +3434,19 @@ mod tests {
             .block_by_block_spec(&block_spec)?
             .context("block should exist")?;
 
-        assert_eq!(block.header().number, 0);
+        assert_eq!(block.block_header().number, 0);
 
         Ok(())
     }
 
     #[test]
     fn block_by_block_spec_finalized_safe_latest() -> anyhow::Result<()> {
-        let mut fixture = ProviderTestFixture::new_local()?;
+        let mut fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
 
         // Mine a block to make sure we're not getting the genesis block
         fixture
             .provider_data
-            .mine_and_commit_block(BlockOptions::default())?;
+            .mine_and_commit_block(HeaderOverrides::default())?;
         let last_block_number = fixture.provider_data.last_block_number();
         // Sanity check
         assert!(last_block_number > 0);
@@ -3152,7 +3460,7 @@ mod tests {
                 .block_by_block_spec(&block_spec)?
                 .context("block should exist")?;
 
-            assert_eq!(block.header().number, last_block_number);
+            assert_eq!(block.block_header().number, last_block_number);
         }
 
         Ok(())
@@ -3160,7 +3468,7 @@ mod tests {
 
     #[test]
     fn block_by_block_spec_pending() -> anyhow::Result<()> {
-        let fixture = ProviderTestFixture::new_local()?;
+        let fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
 
         let block_spec = BlockSpec::Tag(BlockTag::Pending);
 
@@ -3174,7 +3482,7 @@ mod tests {
     // Make sure executing a transaction in a pending block context doesn't panic.
     #[test]
     fn execute_in_block_context_pending() -> anyhow::Result<()> {
-        let mut fixture = ProviderTestFixture::new_local()?;
+        let mut fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
 
         let block_spec = Some(BlockSpec::Tag(BlockTag::Pending));
 
@@ -3184,7 +3492,7 @@ mod tests {
                 .provider_data
                 .execute_in_block_context(block_spec.as_ref(), |_, _, _| {
                     value += 1;
-                    Ok::<(), ProviderError<Infallible>>(())
+                    Ok::<(), ProviderErrorForChainSpec<L1ChainSpec>>(())
                 })?;
 
         assert_eq!(value, 1);
@@ -3194,7 +3502,7 @@ mod tests {
 
     #[test]
     fn chain_id() -> anyhow::Result<()> {
-        let fixture = ProviderTestFixture::new_local()?;
+        let fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
 
         let chain_id = fixture.provider_data.chain_id();
         assert_eq!(chain_id, fixture.config.chain_id);
@@ -3205,7 +3513,7 @@ mod tests {
     #[cfg(feature = "test-remote")]
     #[test]
     fn chain_id_fork_mode() -> anyhow::Result<()> {
-        let fixture = ProviderTestFixture::new_forked(None)?;
+        let fixture = ProviderTestFixture::<L1ChainSpec>::new_forked(None)?;
 
         let chain_id = fixture.provider_data.chain_id();
         assert_eq!(chain_id, fixture.config.chain_id);
@@ -3221,7 +3529,7 @@ mod tests {
     #[cfg(feature = "test-remote")]
     #[test]
     fn fork_metadata_fork_mode() -> anyhow::Result<()> {
-        let fixture = ProviderTestFixture::new_forked(None)?;
+        let fixture = ProviderTestFixture::<L1ChainSpec>::new_forked(None)?;
 
         let fork_metadata = fixture
             .provider_data
@@ -3234,7 +3542,7 @@ mod tests {
 
     #[test]
     fn console_log_mine_block() -> anyhow::Result<()> {
-        let mut fixture = ProviderTestFixture::new_local()?;
+        let mut fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
         let ConsoleLogTransaction {
             transaction,
             expected_call_data,
@@ -3250,14 +3558,22 @@ mod tests {
         let prevrandao = fixture.provider_data.prev_randao_generator.next_value();
         let result = fixture.provider_data.mine_block(
             ProviderData::mine_block_with_mem_pool,
-            BlockOptions {
-                timestamp: Some(block_timestamp),
+            HeaderOverrides {
                 mix_hash: Some(prevrandao),
-                ..BlockOptions::default()
+                ..fixture
+                    .provider_data
+                    .header_overrides_with_timestamp(block_timestamp)
             },
         )?;
 
-        let console_log_inputs = result.console_log_inputs;
+        assert_eq!(result.transaction_inspector_data.len(), 1);
+        let console_log_inputs = result
+            .transaction_inspector_data
+            .into_iter()
+            .next()
+            .expect("There should be a transaction")
+            .encoded_console_logs;
+
         assert_eq!(console_log_inputs.len(), 1);
         assert_eq!(console_log_inputs[0], expected_call_data);
 
@@ -3266,7 +3582,7 @@ mod tests {
 
     #[test]
     fn console_log_run_call() -> anyhow::Result<()> {
-        let mut fixture = ProviderTestFixture::new_local()?;
+        let mut fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
         let ConsoleLogTransaction {
             transaction,
             expected_call_data,
@@ -3276,7 +3592,7 @@ mod tests {
             .provider_data
             .sign_transaction_request(transaction)?;
 
-        let result = fixture.provider_data.run_call(
+        let result = fixture.provider_data.run_call_impl(
             pending_transaction,
             &BlockSpec::latest(),
             &StateOverrides::default(),
@@ -3291,13 +3607,13 @@ mod tests {
 
     #[test]
     fn mine_and_commit_block_empty() -> anyhow::Result<()> {
-        let mut fixture = ProviderTestFixture::new_local()?;
+        let mut fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
 
         let previous_block_number = fixture.provider_data.last_block_number();
 
         let result = fixture
             .provider_data
-            .mine_and_commit_block(BlockOptions::default())?;
+            .mine_and_commit_block(HeaderOverrides::default())?;
         assert!(result.block.transactions().is_empty());
 
         let current_block_number = fixture.provider_data.last_block_number();
@@ -3305,7 +3621,7 @@ mod tests {
 
         let cached_state = fixture
             .provider_data
-            .get_or_compute_state(result.block.header().number)?;
+            .get_or_compute_state(result.block.block_header().number)?;
 
         let calculated_state = fixture.provider_data.blockchain.state_at_block_number(
             fixture.provider_data.last_block_number(),
@@ -3319,7 +3635,7 @@ mod tests {
 
     #[test]
     fn mine_and_commit_blocks_empty() -> anyhow::Result<()> {
-        let mut fixture = ProviderTestFixture::new_local()?;
+        let mut fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
 
         fixture
             .provider_data
@@ -3341,10 +3657,10 @@ mod tests {
 
     #[test]
     fn mine_and_commit_block_single_transaction() -> anyhow::Result<()> {
-        let mut fixture = ProviderTestFixture::new_local()?;
+        let mut fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
 
         let transaction = fixture.signed_dummy_transaction(0, None)?;
-        let expected = transaction.value();
+        let expected = *transaction.value();
         let receiver = transaction
             .kind()
             .to()
@@ -3355,7 +3671,7 @@ mod tests {
 
         let result = fixture
             .provider_data
-            .mine_and_commit_block(BlockOptions::default())?;
+            .mine_and_commit_block(HeaderOverrides::default())?;
 
         assert_eq!(result.block.transactions().len(), 1);
 
@@ -3370,7 +3686,7 @@ mod tests {
 
     #[test]
     fn mine_and_commit_block_two_transactions_different_senders() -> anyhow::Result<()> {
-        let mut fixture = ProviderTestFixture::new_local()?;
+        let mut fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
 
         let transaction1 = fixture.signed_dummy_transaction(0, None)?;
         let transaction2 = fixture.signed_dummy_transaction(1, None)?;
@@ -3392,7 +3708,7 @@ mod tests {
 
         let result = fixture
             .provider_data
-            .mine_and_commit_block(BlockOptions::default())?;
+            .mine_and_commit_block(HeaderOverrides::default())?;
 
         assert_eq!(result.block.transactions().len(), 2);
 
@@ -3407,7 +3723,7 @@ mod tests {
 
     #[test]
     fn mine_and_commit_block_two_transactions_same_sender() -> anyhow::Result<()> {
-        let mut fixture = ProviderTestFixture::new_local()?;
+        let mut fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
 
         let transaction1 = fixture.signed_dummy_transaction(0, Some(0))?;
         let transaction2 = fixture.signed_dummy_transaction(0, Some(1))?;
@@ -3429,7 +3745,7 @@ mod tests {
 
         let result = fixture
             .provider_data
-            .mine_and_commit_block(BlockOptions::default())?;
+            .mine_and_commit_block(HeaderOverrides::default())?;
 
         assert_eq!(result.block.transactions().len(), 2);
 
@@ -3444,7 +3760,7 @@ mod tests {
 
     #[test]
     fn mine_and_commit_block_removes_mined_transactions() -> anyhow::Result<()> {
-        let mut fixture = ProviderTestFixture::new_local()?;
+        let mut fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
 
         let transaction = fixture.signed_dummy_transaction(0, None)?;
 
@@ -3457,7 +3773,7 @@ mod tests {
 
         let result = fixture
             .provider_data
-            .mine_and_commit_block(BlockOptions::default())?;
+            .mine_and_commit_block(HeaderOverrides::default())?;
 
         assert_eq!(result.block.transactions().len(), 1);
 
@@ -3469,7 +3785,7 @@ mod tests {
 
     #[test]
     fn mine_and_commit_block_leaves_unmined_transactions() -> anyhow::Result<()> {
-        let mut fixture = ProviderTestFixture::new_local()?;
+        let mut fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
 
         // SAFETY: literal is non-zero
         fixture
@@ -3508,7 +3824,7 @@ mod tests {
 
         let result = fixture
             .provider_data
-            .mine_and_commit_block(BlockOptions::default())?;
+            .mine_and_commit_block(HeaderOverrides::default())?;
 
         // Check that only the first and third transactions were mined
         assert_eq!(result.block.transactions().len(), 2);
@@ -3552,7 +3868,7 @@ mod tests {
             .thread_name("provider-data-test")
             .build()?;
 
-        let mut fixture = ProviderTestFixture::new(runtime, config)?;
+        let mut fixture = ProviderTestFixture::<L1ChainSpec>::new(runtime, config)?;
 
         let transaction1 = fixture.signed_dummy_transaction(0, None)?;
         let transaction2 = fixture.signed_dummy_transaction(1, None)?;
@@ -3566,7 +3882,7 @@ mod tests {
 
         let result = fixture
             .provider_data
-            .mine_and_commit_block(BlockOptions::default())?;
+            .mine_and_commit_block(HeaderOverrides::default())?;
 
         assert_eq!(result.block.transactions().len(), 2);
 
@@ -3589,7 +3905,7 @@ mod tests {
 
     #[test]
     fn mine_and_commit_block_correct_gas_used() -> anyhow::Result<()> {
-        let mut fixture = ProviderTestFixture::new_local()?;
+        let mut fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
 
         let transaction1 = fixture.signed_dummy_transaction(0, None)?;
         let transaction2 = fixture.signed_dummy_transaction(1, None)?;
@@ -3603,7 +3919,7 @@ mod tests {
 
         let result = fixture
             .provider_data
-            .mine_and_commit_block(BlockOptions::default())?;
+            .mine_and_commit_block(HeaderOverrides::default())?;
 
         let receipt1 = fixture
             .provider_data
@@ -3617,7 +3933,7 @@ mod tests {
         assert_eq!(receipt1.gas_used, 21_000);
         assert_eq!(receipt2.gas_used, 21_000);
         assert_eq!(
-            result.block.header().gas_used,
+            result.block.block_header().gas_used,
             receipt1.gas_used + receipt2.gas_used
         );
 
@@ -3628,7 +3944,7 @@ mod tests {
     fn mine_and_commit_block_rewards_miner() -> anyhow::Result<()> {
         let default_config = create_test_config();
         let config = ProviderConfig {
-            hardfork: SpecId::BERLIN,
+            hardfork: edr_chain_l1::Hardfork::BERLIN,
             ..default_config
         };
 
@@ -3638,7 +3954,7 @@ mod tests {
             .thread_name("provider-data-test")
             .build()?;
 
-        let mut fixture = ProviderTestFixture::new(runtime, config)?;
+        let mut fixture = ProviderTestFixture::<L1ChainSpec>::new(runtime, config)?;
 
         let miner = fixture.provider_data.beneficiary;
         let previous_miner_balance = fixture
@@ -3652,7 +3968,7 @@ mod tests {
 
         fixture
             .provider_data
-            .mine_and_commit_block(BlockOptions::default())?;
+            .mine_and_commit_block(HeaderOverrides::default())?;
 
         let miner_balance = fixture
             .provider_data
@@ -3667,7 +3983,7 @@ mod tests {
     fn mine_and_commit_blocks_increases_block_number() -> anyhow::Result<()> {
         const NUM_MINED_BLOCKS: u64 = 10;
 
-        let mut fixture = ProviderTestFixture::new_local()?;
+        let mut fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
 
         let previous_block_number = fixture.provider_data.last_block_number();
 
@@ -3680,7 +3996,7 @@ mod tests {
             previous_block_number + NUM_MINED_BLOCKS
         );
         assert_eq!(
-            fixture.provider_data.last_block()?.header().number,
+            fixture.provider_data.last_block()?.block_header().number,
             previous_block_number + NUM_MINED_BLOCKS
         );
 
@@ -3691,7 +4007,7 @@ mod tests {
     fn mine_and_commit_blocks_works_with_snapshots() -> anyhow::Result<()> {
         const NUM_MINED_BLOCKS: u64 = 10;
 
-        let mut fixture = ProviderTestFixture::new_local()?;
+        let mut fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
 
         let transaction1 = fixture.signed_dummy_transaction(0, None)?;
         let transaction2 = fixture.signed_dummy_transaction(1, None)?;
@@ -3754,7 +4070,7 @@ mod tests {
 
     #[test]
     fn next_filter_id() -> anyhow::Result<()> {
-        let mut fixture = ProviderTestFixture::new_local()?;
+        let mut fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
 
         let mut prev_filter_id = fixture.provider_data.last_filter_id;
         for _ in 0..10 {
@@ -3768,7 +4084,7 @@ mod tests {
 
     #[test]
     fn pending_transactions_returns_pending_and_queued() -> anyhow::Result<()> {
-        let mut fixture = ProviderTestFixture::new_local().unwrap();
+        let mut fixture = ProviderTestFixture::<L1ChainSpec>::new_local().unwrap();
 
         let transaction1 = fixture.signed_dummy_transaction(0, Some(0))?;
         fixture
@@ -3801,7 +4117,7 @@ mod tests {
 
     #[test]
     fn set_balance_updates_mem_pool() -> anyhow::Result<()> {
-        let mut fixture = ProviderTestFixture::new_local()?;
+        let mut fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
 
         let transaction = fixture.impersonated_dummy_transaction()?;
         let transaction_hash = fixture.provider_data.add_pending_transaction(transaction)?;
@@ -3827,7 +4143,7 @@ mod tests {
 
     #[test]
     fn transaction_by_invalid_hash() -> anyhow::Result<()> {
-        let fixture = ProviderTestFixture::new_local()?;
+        let fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
 
         let non_existing_tx = fixture.provider_data.transaction_by_hash(&B256::ZERO)?;
 
@@ -3838,7 +4154,7 @@ mod tests {
 
     #[test]
     fn pending_transaction_by_hash() -> anyhow::Result<()> {
-        let mut fixture = ProviderTestFixture::new_local()?;
+        let mut fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
 
         let transaction_request = fixture.signed_dummy_transaction(0, None)?;
         let transaction_hash = fixture
@@ -3860,7 +4176,7 @@ mod tests {
 
     #[test]
     fn transaction_by_hash() -> anyhow::Result<()> {
-        let mut fixture = ProviderTestFixture::new_local()?;
+        let mut fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
 
         let transaction_request = fixture.signed_dummy_transaction(0, None)?;
         let transaction_hash = fixture
@@ -3869,7 +4185,7 @@ mod tests {
 
         let results = fixture
             .provider_data
-            .mine_and_commit_block(BlockOptions::default())?;
+            .mine_and_commit_block(HeaderOverrides::default())?;
 
         // Make sure transaction was mined successfully.
         assert!(results
@@ -3895,7 +4211,7 @@ mod tests {
 
     #[test]
     fn sign_typed_data_v4() -> anyhow::Result<()> {
-        let fixture = ProviderTestFixture::new_local()?;
+        let fixture = ProviderTestFixture::<L1ChainSpec>::new_local()?;
 
         // This test was taken from the `eth_signTypedData` example from the
         // EIP-712 specification via Hardhat.
@@ -3954,75 +4270,39 @@ mod tests {
 
     #[cfg(feature = "test-remote")]
     mod alchemy {
-        use edr_test_utils::env::get_alchemy_url;
+        use edr_chain_l1::L1ChainSpec;
+        use edr_chain_spec::EvmTransactionValidationError;
+        use edr_chain_spec_evm::TransactionError;
+        use edr_test_block_replay::impl_full_block_tests;
+        use edr_test_utils::env::json_rpc_url_provider;
 
         use super::*;
-        use crate::test_utils::FORK_BLOCK_NUMBER;
-
-        #[test]
-        fn reset_local_to_forking() -> anyhow::Result<()> {
-            let mut fixture = ProviderTestFixture::new_local()?;
-
-            let fork_config = Some(ForkConfig {
-                json_rpc_url: get_alchemy_url(),
-                // Random recent block for better cache consistency
-                block_number: Some(FORK_BLOCK_NUMBER),
-                http_headers: None,
-            });
-
-            let block_spec = BlockSpec::Number(FORK_BLOCK_NUMBER);
-
-            assert_eq!(fixture.provider_data.last_block_number(), 0);
-
-            fixture.provider_data.reset(fork_config)?;
-
-            // We're fetching a specific block instead of the last block number for the
-            // forked blockchain, because the last block number query cannot be
-            // cached.
-            assert!(fixture
-                .provider_data
-                .block_by_block_spec(&block_spec)?
-                .is_some());
-
-            Ok(())
-        }
-
-        #[test]
-        fn reset_forking_to_local() -> anyhow::Result<()> {
-            let mut fixture = ProviderTestFixture::new_forked(None)?;
-
-            // We're fetching a specific block instead of the last block number for the
-            // forked blockchain, because the last block number query cannot be
-            // cached.
-            assert!(fixture
-                .provider_data
-                .block_by_block_spec(&BlockSpec::Number(FORK_BLOCK_NUMBER))?
-                .is_some());
-
-            fixture.provider_data.reset(None)?;
-
-            assert_eq!(fixture.provider_data.last_block_number(), 0);
-
-            Ok(())
-        }
+        use crate::{
+            test_utils::{
+                l1_base_header_overrides, l1_header_overrides_before_merge, prague_header_overrides,
+            },
+            ForkConfig,
+        };
 
         #[test]
         fn run_call_in_hardfork_context() -> anyhow::Result<()> {
             use alloy_sol_types::{sol, SolCall};
-            use edr_evm::transaction::TransactionError;
-            use edr_rpc_eth::CallRequest;
+            use edr_chain_l1::rpc::call::L1CallRequest;
 
             use crate::{
-                requests::eth::resolve_call_request, test_utils::create_test_config_with_fork,
+                requests::eth::resolve_call_request,
+                test_utils::{create_test_config_with, MinimalProviderConfig},
             };
 
             sol! { function Hello() public pure returns (string); }
 
-            fn assert_decoded_output(result: ExecutionResult) -> anyhow::Result<()> {
+            fn assert_decoded_output(
+                result: ExecutionResult<edr_chain_l1::HaltReason>,
+            ) -> anyhow::Result<()> {
                 let output = result.into_output().expect("Call must have output");
-                let decoded = HelloCall::abi_decode_returns(output.as_ref(), false)?;
+                let decoded = HelloCall::abi_decode_returns(output.as_ref())?;
 
-                assert_eq!(decoded._0, "Hello World");
+                assert_eq!(decoded, "Hello World");
                 Ok(())
             }
 
@@ -4031,10 +4311,11 @@ mod tests {
             ///
             /// Should return a string `"Hello World"`.
             fn call_hello_world_contract(
-                data: &mut ProviderData<Infallible>,
+                data: &mut ProviderData<L1ChainSpec>,
                 block_spec: BlockSpec,
-                request: CallRequest,
-            ) -> Result<CallResult, ProviderError<Infallible>> {
+                request: L1CallRequest,
+            ) -> Result<CallResult<edr_chain_l1::HaltReason>, ProviderErrorForChainSpec<L1ChainSpec>>
+            {
                 let state_overrides = StateOverrides::default();
 
                 let transaction =
@@ -4055,31 +4336,34 @@ mod tests {
                 .thread_name("provider-data-test")
                 .build()?;
 
-            let default_config = create_test_config_with_fork(Some(ForkConfig {
-                json_rpc_url: get_alchemy_url(),
-                block_number: Some(EIP_1559_ACTIVATION_BLOCK),
-                http_headers: None,
-            }));
+            let default_config =
+                create_test_config_with(MinimalProviderConfig::fork_with_accounts(ForkConfig {
+                    block_number: Some(EIP_1559_ACTIVATION_BLOCK),
+                    cache_dir: edr_defaults::CACHE_DIR.into(),
+                    chain_overrides: HashMap::default(),
+                    http_headers: None,
+                    url: json_rpc_url_provider::ethereum_mainnet(),
+                }));
 
             let config = ProviderConfig {
                 // SAFETY: literal is non-zero
                 block_gas_limit: unsafe { NonZeroU64::new_unchecked(1_000_000) },
                 chain_id: 1,
                 coinbase: Address::ZERO,
-                hardfork: SpecId::LONDON,
+                hardfork: edr_chain_l1::Hardfork::LONDON,
                 network_id: 1,
                 ..default_config
             };
 
-            let mut fixture = ProviderTestFixture::new(runtime, config)?;
+            let mut fixture = ProviderTestFixture::<L1ChainSpec>::new(runtime, config)?;
 
-            let default_call = CallRequest {
+            let default_call = L1CallRequest {
                 from: Some(fixture.nth_local_account(0)?),
                 to: Some(hello_world_contract_address),
                 gas: Some(1_000_000),
                 value: Some(U256::ZERO),
                 data: Some(hello_world_contract_call.abi_encode().into()),
-                ..CallRequest::default()
+                ..L1CallRequest::default()
             };
 
             // Should accept post-EIP-1559 gas semantics when running in the context of a
@@ -4087,8 +4371,8 @@ mod tests {
             let result = call_hello_world_contract(
                 &mut fixture.provider_data,
                 BlockSpec::Number(EIP_1559_ACTIVATION_BLOCK),
-                CallRequest {
-                    max_fee_per_gas: Some(U256::ZERO),
+                L1CallRequest {
+                    max_fee_per_gas: Some(0),
                     ..default_call.clone()
                 },
             )?;
@@ -4100,8 +4384,8 @@ mod tests {
             let result = call_hello_world_contract(
                 &mut fixture.provider_data,
                 BlockSpec::Number(EIP_1559_ACTIVATION_BLOCK - 1),
-                CallRequest {
-                    gas_price: Some(U256::ZERO),
+                L1CallRequest {
+                    gas_price: Some(0),
                     ..default_call.clone()
                 },
             )?;
@@ -4113,8 +4397,8 @@ mod tests {
             let result = call_hello_world_contract(
                 &mut fixture.provider_data,
                 BlockSpec::Number(EIP_1559_ACTIVATION_BLOCK - 1),
-                CallRequest {
-                    max_fee_per_gas: Some(U256::ZERO),
+                L1CallRequest {
+                    max_fee_per_gas: Some(0),
                     ..default_call.clone()
                 },
             );
@@ -4122,7 +4406,9 @@ mod tests {
             assert!(matches!(
                 result,
                 Err(ProviderError::RunTransaction(
-                    TransactionError::Eip1559Unsupported
+                    TransactionError::InvalidTransaction(
+                        EvmTransactionValidationError::Eip1559NotSupported
+                    )
                 ))
             ));
 
@@ -4131,8 +4417,8 @@ mod tests {
             let result = call_hello_world_contract(
                 &mut fixture.provider_data,
                 BlockSpec::Number(EIP_1559_ACTIVATION_BLOCK),
-                CallRequest {
-                    gas_price: Some(U256::ZERO),
+                L1CallRequest {
+                    gas_price: Some(0),
                     ..default_call.clone()
                 },
             )?;
@@ -4148,8 +4434,8 @@ mod tests {
             let result = call_hello_world_contract(
                 &mut fixture.provider_data,
                 BlockSpec::Number(previous_block_number + 50),
-                CallRequest {
-                    max_fee_per_gas: Some(U256::ZERO),
+                L1CallRequest {
+                    max_fee_per_gas: Some(0),
                     ..default_call
                 },
             )?;
@@ -4159,85 +4445,90 @@ mod tests {
             Ok(())
         }
 
-        macro_rules! impl_full_block_tests {
-        ($(
-            $name:ident => {
-                block_number: $block_number:expr,
-                chain_id: $chain_id:expr,
-                url: $url:expr,
-            },
-        )+) => {
-            $(
-                paste::item! {
-                    #[serial_test::serial]
-                    #[tokio::test(flavor = "multi_thread")]
-                    async fn [<full_block_ $name>]() -> anyhow::Result<()> {
-                        let url = $url;
-
-                        crate::test_utils::run_full_block(url, $block_number, $chain_id).await
-                    }
-                }
-            )+
-        }
-    }
-
         impl_full_block_tests! {
-            mainnet_byzantium => {
+            mainnet_byzantium => L1ChainSpec {
                 block_number: 4_370_001,
-                chain_id: 1,
-                url: get_alchemy_url(),
+                url: json_rpc_url_provider::ethereum_mainnet(),
+                header_overrides_constructor: l1_header_overrides_before_merge,
             },
-            mainnet_constantinople => {
+            mainnet_constantinople => L1ChainSpec {
                 block_number: 7_280_001,
-                chain_id: 1,
-                url: get_alchemy_url(),
+                url: json_rpc_url_provider::ethereum_mainnet(),
+                header_overrides_constructor: l1_header_overrides_before_merge,
             },
-            mainnet_istanbul => {
+            mainnet_istanbul => L1ChainSpec {
                 block_number: 9_069_001,
-                chain_id: 1,
-                url: get_alchemy_url(),
+                url: json_rpc_url_provider::ethereum_mainnet(),
+                header_overrides_constructor: l1_header_overrides_before_merge,
             },
-            mainnet_muir_glacier => {
+            mainnet_muir_glacier => L1ChainSpec {
                 block_number: 9_300_077,
-                chain_id: 1,
-                url: get_alchemy_url(),
+                url: json_rpc_url_provider::ethereum_mainnet(),
+                header_overrides_constructor: l1_header_overrides_before_merge,
             },
-            mainnet_shanghai => {
+            mainnet_shanghai => L1ChainSpec {
                 block_number: 17_050_001,
-                chain_id: 1,
-                url: get_alchemy_url(),
+                url: json_rpc_url_provider::ethereum_mainnet(),
+                header_overrides_constructor: l1_base_header_overrides,
             },
             // This block contains a sequence of transaction that first raise
             // an empty account's balance and then decrease it
-            mainnet_19318016 => {
+            mainnet_19318016 => L1ChainSpec {
                 block_number: 19_318_016,
-                chain_id: 1,
-                url: get_alchemy_url(),
+                url: json_rpc_url_provider::ethereum_mainnet(),
+                header_overrides_constructor: l1_base_header_overrides,
             },
             // This block has both EIP-2930 and EIP-1559 transactions
-            sepolia_eip_1559_2930 => {
+            sepolia_eip_1559_2930 => L1ChainSpec {
                 block_number: 5_632_795,
-                chain_id: 11_155_111,
-                url: get_alchemy_url().replace("mainnet", "sepolia"),
+                url: json_rpc_url_provider::ethereum_mainnet().replace("mainnet", "sepolia"),
+                header_overrides_constructor: l1_base_header_overrides,
             },
-            sepolia_shanghai => {
+            sepolia_shanghai => L1ChainSpec {
                 block_number: 3_095_000,
-                chain_id: 11_155_111,
-                url: get_alchemy_url().replace("mainnet", "sepolia"),
+                url: json_rpc_url_provider::ethereum_mainnet().replace("mainnet", "sepolia"),
+                header_overrides_constructor: l1_base_header_overrides,
             },
             // This block has an EIP-4844 transaction
-            mainnet_cancun => {
+            mainnet_cancun => L1ChainSpec {
                 block_number: 19_529_021,
-                chain_id: 1,
-                url: get_alchemy_url(),
+                url: json_rpc_url_provider::ethereum_mainnet(),
+                header_overrides_constructor: l1_base_header_overrides,
             },
             // This block contains a transaction that uses the KZG point evaluation
             // precompile, introduced in Cancun
-            mainnet_cancun2 => {
+            mainnet_cancun2 => L1ChainSpec {
                 block_number: 19_562_047,
-                chain_id: 1,
-                url: get_alchemy_url(),
+                url: json_rpc_url_provider::ethereum_mainnet(),
+                header_overrides_constructor: l1_base_header_overrides,
             },
+            // This block contains both valid and invalid EIP-7702 transactions, introduced in Prague
+            mainnet_prague => L1ChainSpec {
+                block_number: 23_376_625,
+                url: json_rpc_url_provider::ethereum_mainnet(),
+                header_overrides_constructor: prague_header_overrides,
+            },
+            mainnet_osaka => L1ChainSpec {
+                block_number: 23_957_251,
+                url: json_rpc_url_provider::ethereum_mainnet(),
+                header_overrides_constructor: prague_header_overrides,
+            },
+            mainnet_osaka_bpo1 => L1ChainSpec {
+                block_number: 23_990_516,
+                url: json_rpc_url_provider::ethereum_mainnet(),
+                header_overrides_constructor: prague_header_overrides,
+            },
+            mainnet_blob_excess_gas_calculation_issue => L1ChainSpec {
+                block_number: 24_035_797,
+                url: json_rpc_url_provider::ethereum_mainnet(),
+                header_overrides_constructor: prague_header_overrides,
+            },
+            mainnet_requests_hash_not_empty => L1ChainSpec {
+                block_number: 24_105_015,
+                url: json_rpc_url_provider::ethereum_mainnet(),
+                header_overrides_constructor: prague_header_overrides,
+            },
+
         }
     }
 }

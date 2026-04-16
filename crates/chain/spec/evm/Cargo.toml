@@ -1,0 +1,20 @@
+[package]
+name = "edr_chain_spec_evm"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+edr_chain_spec.workspace = true
+edr_database_components.workspace = true
+edr_primitives.workspace = true
+revm-context = { workspace = true, features = ["optional_balance_check", "optional_block_gas_limit", "optional_eip3607"] }
+revm-handler.workspace = true
+revm-inspector.workspace = true
+revm-interpreter.workspace = true
+thiserror.workspace = true
+
+[features]
+tracing = ["edr_database_components/tracing"]
+
+[lints]
+workspace = true

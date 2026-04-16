@@ -6,7 +6,7 @@
 //!
 //! 2. In the `forge-std` repo root:
 //!
-//!    2.1. `npm i`
+//!    2.1. `pnpm i`
 //!    2.2. `npx hardhat compile`
 //!
 //! 3. In the `crates/edr_solidity` directory:
@@ -25,7 +25,9 @@ const FORGE_STD_ARTIFACTS_DIR: &str = "EDR_FORGE_STD_ARTIFACTS_DIR";
 
 fn load_build_info_config() -> anyhow::Result<Option<BuildInfoConfig>> {
     let Ok(artifacts_dir) = std::env::var(FORGE_STD_ARTIFACTS_DIR) else {
-        println!("Skipping contracts identifier benchmark as {FORGE_STD_ARTIFACTS_DIR} environment variable is not set");
+        println!(
+            "Skipping contracts identifier benchmark as {FORGE_STD_ARTIFACTS_DIR} environment variable is not set"
+        );
         return Ok(None);
     };
     let build_info_dir = PathBuf::from(&artifacts_dir).join("build-info");
@@ -61,7 +63,10 @@ pub fn criterion_benchmark(c: &mut Criterion) {
         .contracts;
 
     // Sanity check
-    let total_contracts = contracts.iter().map(|(_k, v)| v.len()).sum::<usize>();
+    let total_contracts = contracts
+        .values()
+        .map(std::collections::HashMap::len)
+        .sum::<usize>();
     let min_contracts = 70;
     assert!(
         total_contracts >= min_contracts,
