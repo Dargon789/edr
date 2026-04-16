@@ -80,11 +80,14 @@ jobs:
         uses: actions/download-artifact@v5
         with:
           merge-multiple: true
-          # Download all foundry artifacts from the triggering release run
+          # Download all foundry artifacts from the trusted release workflow/run only
           pattern: "foundry_*"
           # Extract artifacts into an isolated temp directory, not the workspace
           path: ${{ steps.paths.outputs.artifact_dir }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          workflow: release.yml
+          if_no_artifact_found: fail
           run-id: ${{ github.event.workflow_run.id || inputs.run_id }}
 
       - name: Validate Downloaded Artifacts
