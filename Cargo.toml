@@ -307,7 +307,7 @@ alloy-rlp = { version = "0.3.12", features = ["derive"] }
 alloy-trie = "0.9.3"
 
 ## misc
-anyhow = { version = "1.0.100", default-features = false }
+anyhow = { version = "1.0.102", default-features = false }
 arrayvec = "0.7"
 auto_impl = { version = "1.2", default-features = false }
 dunce = "1"
