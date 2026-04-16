@@ -165,6 +165,9 @@ jobs:
       - name: Ensure npm workspace is unmodified and clean
         run: |
           set -euo pipefail
+          # Re-assert trust boundary: restore npm workspace tracked files from checked-out commit.
+          # This prevents any prior step (including untrusted artifact handling) from influencing install inputs.
+          git restore --source=HEAD --staged --worktree ./npm
           # Fail if package.json or bun.lockb are different from committed version
           git diff --exit-code ./npm/package.json ./npm/bun.lockb
           # Ensure npm workspace directory exists
