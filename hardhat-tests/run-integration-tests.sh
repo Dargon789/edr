@@ -4,7 +4,7 @@ set -euo pipefail
 
 pnpm build:edr
 
-cd integration
+cd "$(dirname "$0")/integration"
 for i in *; do
   if [ -d "$i" ]; then
     echo "Running integration test: '$i'"
