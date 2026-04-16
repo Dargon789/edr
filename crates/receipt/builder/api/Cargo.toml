@@ -1,0 +1,15 @@
+[package]
+name = "edr_receipt_builder_api"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+edr_block_header.workspace = true
+edr_chain_spec_evm.workspace = true
+edr_state_api.workspace = true
+
+[features]
+tracing = ["edr_chain_spec_evm/tracing"]
+
+[lints]
+workspace = true

@@ -17,26 +17,37 @@ jobs:
       fail-fast: false
       matrix:
         node: [20]
-        os: ["macos-latest", "ubuntu-latest", "windows-latest"]
+        os: ["macos-15", "ubuntu-24.04", "windows-2025"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          persist-credentials: false
+
       - uses: ./.github/actions/setup-node
         with:
           node-version: ${{ matrix.node }}
+
       - uses: ./.github/actions/setup-rust
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@8cd2ac21dc357ca7dd807fe294d11e9ef84f60ec # v2.62.53
+        with:
+          tool: cargo-llvm-cov@0.6.21
 
       - name: Install package
         run: pnpm install --frozen-lockfile --prefer-offline
 
       - name: Cache network requests
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             hardhat-tests/test/internal/hardhat-network/provider/.hardhat_node_test_cache
           key: hardhat-network-forking-tests-${{ hashFiles('pnpm-lock.yaml') }}
 
       - name: Cache stack trace artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             hardhat-tests/test/internal/hardhat-network/stack-traces/test-files/artifacts
@@ -50,12 +61,21 @@ jobs:
           FORCE_COLOR: 3
           NODE_OPTIONS: --max-old-space-size=4096
           DEBUG: "hardhat:core:hardhat-network:*"
-        run: cd hardhat-tests && pnpm test:ci
+        shell: bash
+        run: |
+          source <(cargo llvm-cov show-env --export-prefix)
+          pnpm -C hardhat-tests test
+          # `--release` included to match `build:dev` compilation flags
+          cargo llvm-cov report --release --locked --codecov --output-path codecov.json
+
   lint-hardhat-tests:
     name: Lint Hardhat tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          persist-credentials: false
+
       - uses: ./.github/actions/setup-node
 
       - name: Install package

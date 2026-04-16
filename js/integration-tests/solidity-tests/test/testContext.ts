@@ -1,0 +1,300 @@
+import {
+  Artifact,
+  ArtifactId,
+  CallTrace,
+  EdrContext,
+  HeuristicFailed,
+  L1_CHAIN_TYPE,
+  l1GenesisState,
+  l1HardforkLatest,
+  l1SolidityTestRunnerFactory,
+  opGenesisState,
+  opLatestHardfork,
+  OP_CHAIN_TYPE,
+  type SolidityTestRunnerConfigArgs,
+  StackTrace,
+  TracingConfigWithBuffers,
+  UnexpectedError,
+  UnsafeToReplay,
+  opSolidityTestRunnerFactory,
+  SuiteResult,
+  SolidityTestResult,
+  CheatcodeErrorDetails,
+  l1HardforkToString,
+  opHardforkToString,
+} from "@nomicfoundation/edr";
+import {
+  buildSolidityTestsInput,
+  runAllSolidityTests,
+} from "@nomicfoundation/edr-helpers";
+import hre from "hardhat";
+import assert from "node:assert/strict";
+
+type StackTraceResult =
+  | StackTrace
+  | UnexpectedError
+  | HeuristicFailed
+  | UnsafeToReplay
+  | null
+  | undefined;
+
+export class TestContext {
+  readonly edrContext: EdrContext = new EdrContext();
+  readonly rpcUrl = process.env.ALCHEMY_URL;
+  readonly rpcCachePath: string = "./edr-cache";
+  readonly fuzzFailuresPersistDir: string = "./edr-cache/fuzz";
+  readonly invariantFailuresPersistDir: string = "./edr-cache/invariant";
+  readonly artifacts: Artifact[];
+  readonly testSuiteIds: ArtifactId[];
+  readonly tracingConfig: TracingConfigWithBuffers;
+
+  private constructor(
+    artifacts: Artifact[],
+    testSuiteIds: ArtifactId[],
+    tracingConfig: TracingConfigWithBuffers
+  ) {
+    this.artifacts = artifacts;
+    this.testSuiteIds = testSuiteIds;
+    this.tracingConfig = tracingConfig;
+  }
+
+  static async setup(): Promise<TestContext> {
+    const results = await buildSolidityTestsInput(hre);
+    const context = new TestContext(
+      results.artifacts,
+      results.testSuiteIds,
+      results.tracingConfig
+    );
+
+    await context.edrContext.registerSolidityTestRunnerFactory(
+      L1_CHAIN_TYPE,
+      l1SolidityTestRunnerFactory()
+    );
+    await context.edrContext.registerSolidityTestRunnerFactory(
+      OP_CHAIN_TYPE,
+      opSolidityTestRunnerFactory()
+    );
+
+    return context;
+  }
+
+  defaultConfig(
+    chainType: string = L1_CHAIN_TYPE
+  ): SolidityTestRunnerConfigArgs {
+    let localPredeploys = undefined;
+    if (chainType === L1_CHAIN_TYPE) {
+      localPredeploys = l1GenesisState(l1HardforkLatest());
+    } else if (chainType === OP_CHAIN_TYPE) {
+      localPredeploys = opGenesisState(opLatestHardfork());
+    }
+
+    return {
+      projectRoot: hre.config.paths.root,
+      rpcCachePath: this.rpcCachePath,
+      localPredeploys: localPredeploys,
+      hardfork:
+        chainType === L1_CHAIN_TYPE
+          ? l1HardforkToString(l1HardforkLatest())
+          : opHardforkToString(opLatestHardfork()),
+    };
+  }
+
+  async runTestsWithStats(
+    contractName: string,
+    config?: Omit<SolidityTestRunnerConfigArgs, "projectRoot" | "hardfork">,
+    chainType: string = L1_CHAIN_TYPE
+  ): Promise<SolidityTestsRunResult> {
+    let totalTests = 0;
+    let failedTests = 0;
+
+    let testContracts = this.matchingTest(contractName);
+    if (testContracts.length === 0) {
+      throw new Error(`No matching test contract found for ${contractName}`);
+    }
+
+    let suiteResults: SuiteResult[] = [];
+    let solidityTestResult: SolidityTestResult | undefined = undefined;
+
+    [solidityTestResult, suiteResults] = await runAllSolidityTests(
+      this.edrContext,
+      chainType,
+      this.artifacts,
+      testContracts,
+      this.tracingConfig,
+      {
+        ...this.defaultConfig(chainType),
+        ...config,
+      }
+    );
+
+    const stackTraces = new Map();
+    const callTraces = new Map();
+    for (const suiteResult of suiteResults) {
+      for (const testResult of suiteResult.testResults) {
+        callTraces.set(testResult.name, testResult.callTraces());
+
+        let failed = testResult.status === "Failure";
+        totalTests++;
+        if (failed) {
+          failedTests++;
+          const stackTrace = testResult.stackTrace();
+          stackTraces.set(testResult.name, {
+            stackTrace,
+            reason: testResult.reason,
+          });
+        }
+      }
+    }
+    return {
+      totalTests,
+      failedTests,
+      stackTraces,
+      callTraces,
+      suiteResults,
+      testResult: solidityTestResult,
+    };
+  }
+
+  matchingTest(contractName: string): ArtifactId[] {
+    return this.matchingTests(new Set([contractName]));
+  }
+
+  matchingTests(testContractNames: Set<string>): ArtifactId[] {
+    return this.testSuiteIds.filter((testSuiteId) => {
+      return testContractNames.has(testSuiteId.name);
+    });
+  }
+}
+
+interface SolidityTestsRunResult {
+  totalTests: number;
+  failedTests: number;
+  stackTraces: Map<
+    string,
+    {
+      stackTrace: StackTraceResult | undefined;
+      reason: string | undefined;
+    }
+  >;
+  callTraces: Map<string, CallTrace[]>;
+  suiteResults: SuiteResult[];
+  testResult?: SolidityTestResult;
+}
+
+type ActualStackTraceResult =
+  | { stackTrace: StackTraceResult | undefined; reason: string | undefined }
+  | undefined
+  | null;
+
+export function assertStackTraces(
+  actual: ActualStackTraceResult,
+  expectedReason: string,
+  expectedEntries: {
+    function: string;
+    contract: string;
+    message?: string;
+    errorDetails?: CheatcodeErrorDetails;
+    line?: number;
+  }[]
+) {
+  if (
+    actual === undefined ||
+    actual == null ||
+    actual.stackTrace === undefined ||
+    actual.stackTrace === null
+  ) {
+    throw new Error("Stack trace is undefined");
+  }
+
+  if (actual.reason === undefined || !actual.reason.includes(expectedReason)) {
+    throw new Error(
+      `Expected stack trace reason to include '${expectedReason}', but got '${actual.reason}'`
+    );
+  }
+
+  if (actual.stackTrace.kind === "HeuristicFailed") {
+    throw new Error("Stack trace result is 'HeuristicFailed'");
+  }
+  if (actual.stackTrace.kind === "UnsafeToReplay") {
+    throw new Error(
+      `Stack trace is unsafe to replay. Impure cheatcodes: '${actual.stackTrace.impureCheatcodes}'`
+    );
+  }
+  if (actual.stackTrace.kind === "UnexpectedError") {
+    throw new Error(
+      `Unexpected stack trace error: '${actual.stackTrace.errorMessage}'`
+    );
+  }
+
+  const stackTrace = actual.stackTrace;
+  if (stackTrace === undefined) {
+    throw new Error("Stack trace is missing");
+  }
+  assert.equal(stackTrace.entries.length, expectedEntries.length);
+  for (let i = 0; i < stackTrace.entries.length; i += 1) {
+    const expected = expectedEntries[i];
+    const sourceReference = stackTrace.entries[i].sourceReference;
+    if (sourceReference === undefined) {
+      throw new Error(
+        `source reference is undefined for contract '${expected.contract}' function '${expected.function}'`
+      );
+    }
+    assert.equal(sourceReference.contract, expected.contract);
+    assert.equal(sourceReference.function, expected.function);
+    assert(sourceReference.sourceContent.includes(expected.function));
+    if (expected.line !== undefined) {
+      assert.equal(sourceReference.line, expected.line);
+    }
+    if (expected.message !== undefined) {
+      assert(
+        stackTrace.entries[i].message == expected.message,
+        `Expected message '${expected.message}' not found in entry: ${JSON.stringify(
+          stackTrace.entries[i],
+          null,
+          2
+        )}`
+      );
+    }
+    if (expected.errorDetails !== undefined) {
+      const actualDetails = stackTrace.entries[i].details;
+      assert(
+        actualDetails !== undefined,
+        `Expected structured error details but none found in entry: ${JSON.stringify(
+          stackTrace.entries[i],
+          null,
+          2
+        )}`
+      );
+      assert(
+        expected.errorDetails.code === actualDetails.code,
+        `Expected error code '${expected.errorDetails.code}' but got '${actualDetails.code}'`
+      );
+      assert(
+        expected.errorDetails.cheatcode === actualDetails.cheatcode,
+        `Expected cheatcode '${expected.errorDetails.cheatcode}' but got '${actualDetails.cheatcode}'`
+      );
+    }
+  }
+}
+
+export function assertImpureCheatcode(
+  actual: ActualStackTraceResult,
+  expectedCheatcode: string
+) {
+  if (
+    actual === undefined ||
+    actual === null ||
+    actual.stackTrace?.kind !== "UnsafeToReplay"
+  ) {
+    throw new Error(
+      `Expected unsafe to replay stack trace, instead it is: ${actual}`
+    );
+  }
+  // When using forking from latest block, no stack trace should be generated as re-execution is unsafe.
+  assert.equal(
+    actual.stackTrace.impureCheatcodes.filter((cheatcode) =>
+      cheatcode.includes(expectedCheatcode)
+    ).length,
+    1
+  );
+}

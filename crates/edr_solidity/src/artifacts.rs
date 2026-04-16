@@ -14,10 +14,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, thiserror::Error)]
 pub enum BuildInfoConfigError {
     /// JSON deserialization error
-    #[error(transparent)]
+    #[error("Failed to parse build info: {0}")]
     Json(#[from] serde_json::Error),
     /// Invalid semver in the build info
-    #[error(transparent)]
+    #[error("Invalid solc version: {0}")]
     Semver(#[from] semver::Error),
     /// Input output file mismatch
     #[error("Input output mismatch. Input id: '{input_id}'. Output id: '{output_id}'")]
@@ -293,4 +293,24 @@ pub struct LinkReference {
 pub struct ImmutableReference {
     pub start: u32,
     pub length: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serde_compiler_input() {
+        // these were taken from a run of TypeScript function compileLiteral
+        let compiler_input_json = include_str!("../fixtures/compiler_input.json");
+
+        let _compiler_input: CompilerInput = serde_json::from_str(compiler_input_json).unwrap();
+    }
+
+    #[test]
+    fn serde_compiler_output() {
+        // these were taken from a run of TypeScript function compileLiteral
+        let compiler_output_json = include_str!("../fixtures/compiler_output.json");
+        let _compiler_output: CompilerOutput = serde_json::from_str(compiler_output_json).unwrap();
+    }
 }

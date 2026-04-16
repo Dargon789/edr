@@ -1,0 +1,73 @@
+[package]
+name = "edr_generic"
+version.workspace = true
+edition.workspace = true
+description = "A generic chain specification for Ethereum Layer 1 chains."
+
+[dependencies]
+alloy-eips.workspace = true
+alloy-rlp.workspace = true
+alloy-serde = { workspace = true, features = ["std"] }
+derive-where.workspace = true
+edr_block_api.workspace = true
+edr_block_header.workspace = true
+edr_block_local.workspace = true
+edr_block_remote.workspace = true
+edr_chain_config.workspace = true
+edr_chain_l1.workspace = true
+edr_chain_spec.workspace = true
+edr_chain_spec_block.workspace = true
+edr_chain_spec_evm.workspace = true
+edr_chain_spec_provider.workspace = true
+edr_chain_spec_receipt.workspace = true
+edr_chain_spec_rpc.workspace = true
+edr_database_components.workspace = true
+edr_eip1559.workspace = true
+edr_eip2930.workspace = true
+edr_eip7702.workspace = true
+edr_eip7892.workspace = true
+edr_eth.workspace = true
+edr_primitives.workspace = true
+edr_provider.workspace = true
+edr_receipt.workspace = true
+edr_receipt_builder_api.workspace = true
+edr_signer.workspace = true
+edr_solidity.workspace = true
+edr_state_api.workspace = true
+edr_transaction.workspace = true
+log = { version = "0.4.17", default-features = false }
+serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+anyhow = "1.0.89"
+edr_blockchain_api.workspace = true
+edr_defaults.workspace = true
+edr_provider = { workspace = true, features = ["test-utils"] }
+edr_rpc_eth.workspace = true
+edr_rpc_client.workspace = true
+edr_test_utils.workspace = true
+edr_utils.workspace = true
+parking_lot.workspace = true
+paste = { version = "1.0.14", default-features = false }
+serde_json.workspace = true
+serial_test = "2.0.0"
+tokio = { version = "1.21.2", default-features = false, features = ["macros", "rt-multi-thread", "sync"] }
+edr_block_remote.workspace = true
+
+[features]
+test-remote = []
+tracing = [
+    "edr_block_local/tracing",
+    "edr_chain_l1/tracing",
+    "edr_chain_spec_block/tracing",
+    "edr_chain_spec_provider/tracing",
+    "edr_database_components/tracing",
+    "edr_chain_spec_evm/tracing",
+    "edr_receipt_builder_api/tracing",
+    "edr_chain_spec_receipt/tracing",
+    "edr_solidity/tracing"
+]
+
+[lints]
+workspace = true

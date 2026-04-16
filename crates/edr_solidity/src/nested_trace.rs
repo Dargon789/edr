@@ -1,36 +1,105 @@
 //! Naive Rust port of the `MessageTrace` et al. from Hardhat.
 
+mod conversion;
+
 use std::sync::Arc;
 
-use edr_eth::{Address, Bytes, U256};
+use derive_where::derive_where;
+use edr_chain_spec::HaltReasonTrait;
+use edr_primitives::{Address, Bytes, HashMap, U256};
 
+pub use self::conversion::CallTraceArenaConversionError;
 use crate::{build_model::ContractMetadata, exit_code::ExitCode};
 
 /// An EVM trace where the steps are nested according to the call stack.
 #[derive(Clone, Debug)]
-pub enum NestedTrace {
+pub enum NestedTrace<HaltReasonT: HaltReasonTrait> {
     /// Represents a create trace.
-    Create(CreateMessage),
+    Create(CreateMessage<HaltReasonT>),
     /// Represents a call trace.
-    Call(CallMessage),
+    Call(CallMessage<HaltReasonT>),
     /// Represents a precompile trace.
-    Precompile(PrecompileMessage),
+    Precompile(PrecompileMessage<HaltReasonT>),
 }
 
-impl NestedTrace {
+impl<HaltReasonT: HaltReasonTrait> NestedTrace<HaltReasonT> {
     /// Returns the exit code of the trace.
-    pub fn exit_code(&self) -> &ExitCode {
+    pub fn exit_code(&self) -> &ExitCode<HaltReasonT> {
         match self {
             Self::Create(create) => &create.exit,
             Self::Call(call) => &call.exit,
             Self::Precompile(precompile) => &precompile.exit,
         }
     }
+
+    /// Returns the gas used by the trace.
+    pub fn gas_used(&self) -> u64 {
+        match self {
+            Self::Create(create) => create.gas_used,
+            Self::Call(call) => call.gas_used,
+            Self::Precompile(precompile) => precompile.gas_used,
+        }
+    }
+
+    /// Converts a `CallTraceArena` from `revm_inspectors` into a `NestedTrace`.
+    ///
+    /// This function bridges the gap between the halt-reason-agnostic
+    /// `TracingInspector` and the halt-reason-aware `NestedTrace` format.
+    ///
+    /// # Arguments
+    ///
+    /// * `address_to_creation_code` - Mapping from contract addresses to their
+    ///   creation code
+    /// * `address_to_runtime_code` - Mapping from contract addresses to their
+    ///   runtime code
+    /// * `arena` - The call trace arena to convert
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the arena is empty or has an invalid root node.
+    pub fn from_call_trace_arena(
+        address_to_creation_code: &HashMap<Address, &Bytes>,
+        address_to_runtime_code: &HashMap<Address, &Bytes>,
+        arena: &revm_inspectors::tracing::CallTraceArena,
+    ) -> Result<Self, CallTraceArenaConversionError> {
+        conversion::convert_from_arena(address_to_creation_code, address_to_runtime_code, arena)
+    }
+
+    /// Converts a `CallTraceArena` to a `NestedTrace` by automatically
+    /// extracting code mappings from the arena.
+    ///
+    /// This is a convenience method that extracts creation and runtime code
+    /// from CREATE traces in the arena and then performs the conversion.
+    ///
+    /// # Arguments
+    ///
+    /// * `arena` - The call trace arena to convert
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the arena is empty or has an invalid root node.
+    pub fn from_call_trace_arena_with_extracted_code(
+        arena: &revm_inspectors::tracing::CallTraceArena,
+    ) -> Result<Self, CallTraceArenaConversionError> {
+        let mut address_to_creation_code = HashMap::default();
+        let mut address_to_runtime_code = HashMap::default();
+
+        // Extract code mappings from CREATE traces
+        for node in arena.nodes() {
+            let address = node.trace.address;
+            if node.trace.kind.is_any_create() {
+                address_to_creation_code.insert(address, &node.trace.data);
+                address_to_runtime_code.insert(address, &node.trace.output);
+            }
+        }
+
+        Self::from_call_trace_arena(&address_to_creation_code, &address_to_runtime_code, arena)
+    }
 }
 
 /// Represents a precompile message.
 #[derive(Clone, Debug)]
-pub struct PrecompileMessage {
+pub struct PrecompileMessage<HaltReasonT> {
     /// Precompile number.
     pub precompile: u32,
     /// Calldata buffer
@@ -40,23 +109,41 @@ pub struct PrecompileMessage {
     /// Return data buffer.
     pub return_data: Bytes,
     /// EVM exit code.
-    pub exit: ExitCode,
+    pub exit: ExitCode<HaltReasonT>,
     /// How much gas was used.
     pub gas_used: u64,
     /// Depth of the message.
     pub depth: usize,
 }
 
+impl<HaltReasonT> PrecompileMessage<HaltReasonT> {
+    /// Converts the type of the halt reason of the instance.
+    pub fn map_halt_reason<ConversionFnT: Fn(HaltReasonT) -> NewHaltReasonT, NewHaltReasonT>(
+        self,
+        conversion_fn: ConversionFnT,
+    ) -> PrecompileMessage<NewHaltReasonT> {
+        PrecompileMessage {
+            precompile: self.precompile,
+            calldata: self.calldata,
+            value: self.value,
+            return_data: self.return_data,
+            exit: self.exit.map_halt_reason(conversion_fn),
+            gas_used: self.gas_used,
+            depth: self.depth,
+        }
+    }
+}
+
 /// Represents a create message.
 #[derive(Clone, Debug)]
-pub struct CreateMessage {
+pub struct CreateMessage<HaltReasonT> {
     // The following is just an optimization: When processing this traces it's useful to know ahead
     // of time how many subtraces there are.
     /// Number of subtraces. Used to speed up the processing of the traces in
     /// JS.
     pub number_of_subtraces: u32,
     /// Children messages.
-    pub steps: Vec<NestedTraceStep>,
+    pub steps: Vec<NestedTraceStep<HaltReasonT>>,
     /// Resolved metadata of the contract that is being executed.
     pub contract_meta: Option<Arc<ContractMetadata>>,
     /// Address of the deployed contract.
@@ -68,23 +155,51 @@ pub struct CreateMessage {
     /// Return data buffer.
     pub return_data: Bytes,
     /// EVM exit code.
-    pub exit: ExitCode,
+    pub exit: ExitCode<HaltReasonT>,
     /// How much gas was used.
     pub gas_used: u64,
     /// Depth of the message.
     pub depth: usize,
 }
 
+impl<HaltReasonT> CreateMessage<HaltReasonT> {
+    /// Converts the type of the halt reason of the instance.
+    pub fn map_halt_reason<
+        ConversionFnT: Copy + Fn(HaltReasonT) -> NewHaltReasonT,
+        NewHaltReasonT,
+    >(
+        self,
+        conversion_fn: ConversionFnT,
+    ) -> CreateMessage<NewHaltReasonT> {
+        CreateMessage {
+            number_of_subtraces: self.number_of_subtraces,
+            steps: self
+                .steps
+                .into_iter()
+                .map(|step| step.map_halt_reason(conversion_fn))
+                .collect(),
+            contract_meta: self.contract_meta,
+            deployed_contract: self.deployed_contract,
+            code: self.code,
+            value: self.value,
+            return_data: self.return_data,
+            exit: self.exit.map_halt_reason(conversion_fn),
+            gas_used: self.gas_used,
+            depth: self.depth,
+        }
+    }
+}
+
 /// Represents a call message with contract metadata.
 #[derive(Clone, Debug)]
-pub struct CallMessage {
+pub struct CallMessage<HaltReasonT> {
     // The following is just an optimization: When processing this traces it's useful to know ahead
     // of time how many subtraces there are.
     /// Number of subtraces. Used to speed up the processing of the traces in
     /// JS.
     pub number_of_subtraces: u32,
     /// Children messages.
-    pub steps: Vec<NestedTraceStep>,
+    pub steps: Vec<NestedTraceStep<HaltReasonT>>,
     /// Resolved metadata of the contract that is being executed.
     pub contract_meta: Option<Arc<ContractMetadata>>,
     /// Calldata buffer
@@ -100,44 +215,79 @@ pub struct CallMessage {
     /// Return data buffer.
     pub return_data: Bytes,
     /// EVM exit code.
-    pub exit: ExitCode,
+    pub exit: ExitCode<HaltReasonT>,
     /// How much gas was used.
     pub gas_used: u64,
     /// Depth of the message.
     pub depth: usize,
 }
 
-/// Represents a create or call message.
-#[derive(Clone, Debug)]
-pub enum CreateOrCallMessage {
-    /// Represents a create message.
-    Create(CreateMessage),
-    /// Represents a call message.
-    Call(CallMessage),
+impl<HaltReasonT> CallMessage<HaltReasonT> {
+    /// Converts the type of the halt reason of the instance.
+    pub fn map_halt_reason<
+        ConversionFnT: Copy + Fn(HaltReasonT) -> NewHaltReasonT,
+        NewHaltReasonT,
+    >(
+        self,
+        conversion_fn: ConversionFnT,
+    ) -> CallMessage<NewHaltReasonT> {
+        CallMessage {
+            number_of_subtraces: self.number_of_subtraces,
+            steps: self
+                .steps
+                .into_iter()
+                .map(|step| step.map_halt_reason(conversion_fn))
+                .collect(),
+            contract_meta: self.contract_meta,
+            calldata: self.calldata,
+            address: self.address,
+            code_address: self.code_address,
+            code: self.code,
+            value: self.value,
+            return_data: self.return_data,
+            exit: self.exit.map_halt_reason(conversion_fn),
+            gas_used: self.gas_used,
+            depth: self.depth,
+        }
+    }
 }
 
-impl From<CreateMessage> for CreateOrCallMessage {
-    fn from(value: CreateMessage) -> Self {
+/// Represents a create or call message.
+#[derive(Clone, Debug)]
+pub enum CreateOrCallMessage<HaltReasonT: HaltReasonTrait> {
+    /// Represents a create message.
+    Create(CreateMessage<HaltReasonT>),
+    /// Represents a call message.
+    Call(CallMessage<HaltReasonT>),
+}
+
+impl<HaltReasonT: HaltReasonTrait> From<CreateMessage<HaltReasonT>>
+    for CreateOrCallMessage<HaltReasonT>
+{
+    fn from(value: CreateMessage<HaltReasonT>) -> Self {
         CreateOrCallMessage::Create(value)
     }
 }
 
-impl From<CallMessage> for CreateOrCallMessage {
-    fn from(value: CallMessage) -> Self {
+impl<HaltReasonT: HaltReasonTrait> From<CallMessage<HaltReasonT>>
+    for CreateOrCallMessage<HaltReasonT>
+{
+    fn from(value: CallMessage<HaltReasonT>) -> Self {
         CreateOrCallMessage::Call(value)
     }
 }
 
 /// Represents a create or call message.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum CreateOrCallMessageRef<'a> {
+#[derive(Debug)]
+#[derive_where(Clone, Copy)]
+pub(crate) enum CreateOrCallMessageRef<'a, HaltReasonT: HaltReasonTrait> {
     /// Represents a create message.
-    Create(&'a CreateMessage),
+    Create(&'a CreateMessage<HaltReasonT>),
     /// Represents a call message.
-    Call(&'a CallMessage),
+    Call(&'a CallMessage<HaltReasonT>),
 }
 
-impl<'a> CreateOrCallMessageRef<'a> {
+impl<'a, HaltReasonT: HaltReasonTrait> CreateOrCallMessageRef<'a, HaltReasonT> {
     pub fn contract_meta(&self) -> Option<Arc<ContractMetadata>> {
         match self {
             CreateOrCallMessageRef::Create(create) => create.contract_meta.as_ref().map(Arc::clone),
@@ -145,7 +295,7 @@ impl<'a> CreateOrCallMessageRef<'a> {
         }
     }
 
-    pub fn exit_code(&self) -> &ExitCode {
+    pub fn exit_code(&self) -> &ExitCode<HaltReasonT> {
         match self {
             CreateOrCallMessageRef::Create(create) => &create.exit,
             CreateOrCallMessageRef::Call(call) => &call.exit,
@@ -166,7 +316,7 @@ impl<'a> CreateOrCallMessageRef<'a> {
         }
     }
 
-    pub fn steps(&self) -> &'a [NestedTraceStep] {
+    pub fn steps(&self) -> &'a [NestedTraceStep<HaltReasonT>] {
         match self {
             CreateOrCallMessageRef::Create(create) => create.steps.as_slice(),
             CreateOrCallMessageRef::Call(call) => call.steps.as_slice(),
@@ -174,8 +324,10 @@ impl<'a> CreateOrCallMessageRef<'a> {
     }
 }
 
-impl<'a> From<&'a CreateOrCallMessage> for CreateOrCallMessageRef<'a> {
-    fn from(value: &'a CreateOrCallMessage) -> Self {
+impl<'a, HaltReasonT: HaltReasonTrait> From<&'a CreateOrCallMessage<HaltReasonT>>
+    for CreateOrCallMessageRef<'a, HaltReasonT>
+{
+    fn from(value: &'a CreateOrCallMessage<HaltReasonT>) -> Self {
         match value {
             CreateOrCallMessage::Create(create) => CreateOrCallMessageRef::Create(create),
             CreateOrCallMessage::Call(call) => CreateOrCallMessageRef::Call(call),
@@ -183,29 +335,57 @@ impl<'a> From<&'a CreateOrCallMessage> for CreateOrCallMessageRef<'a> {
     }
 }
 
-impl<'a> From<&'a CreateMessage> for CreateOrCallMessageRef<'a> {
-    fn from(value: &'a CreateMessage) -> Self {
+impl<'a, HaltReasonT: HaltReasonTrait> From<&'a CreateMessage<HaltReasonT>>
+    for CreateOrCallMessageRef<'a, HaltReasonT>
+{
+    fn from(value: &'a CreateMessage<HaltReasonT>) -> Self {
         CreateOrCallMessageRef::Create(value)
     }
 }
 
-impl<'a> From<&'a CallMessage> for CreateOrCallMessageRef<'a> {
-    fn from(value: &'a CallMessage) -> Self {
+impl<'a, HaltReasonT: HaltReasonTrait> From<&'a CallMessage<HaltReasonT>>
+    for CreateOrCallMessageRef<'a, HaltReasonT>
+{
+    fn from(value: &'a CallMessage<HaltReasonT>) -> Self {
         CreateOrCallMessageRef::Call(value)
     }
 }
 
 /// Represents a nested trace step with contract metadata.
 #[derive(Clone, Debug)]
-pub enum NestedTraceStep {
+pub enum NestedTraceStep<HaltReasonT> {
     /// Represents a create message.
-    Create(CreateMessage),
+    Create(CreateMessage<HaltReasonT>),
     /// Represents a call message.
-    Call(CallMessage),
+    Call(CallMessage<HaltReasonT>),
     /// Represents a precompile message.
-    Precompile(PrecompileMessage),
+    Precompile(PrecompileMessage<HaltReasonT>),
     /// Minimal EVM step that contains only PC (program counter).
     Evm(EvmStep),
+}
+
+impl<HaltReasonT> NestedTraceStep<HaltReasonT> {
+    /// Converts the type of the halt reason of the instance.
+    pub fn map_halt_reason<
+        ConversionFnT: Copy + Fn(HaltReasonT) -> NewHaltReasonT,
+        NewHaltReasonT,
+    >(
+        self,
+        conversion_fn: ConversionFnT,
+    ) -> NestedTraceStep<NewHaltReasonT> {
+        match self {
+            NestedTraceStep::Create(create) => {
+                NestedTraceStep::Create(create.map_halt_reason(conversion_fn))
+            }
+            NestedTraceStep::Call(call) => {
+                NestedTraceStep::Call(call.map_halt_reason(conversion_fn))
+            }
+            NestedTraceStep::Precompile(precompile) => {
+                NestedTraceStep::Precompile(precompile.map_halt_reason(conversion_fn))
+            }
+            NestedTraceStep::Evm(evm_step) => NestedTraceStep::Evm(evm_step),
+        }
+    }
 }
 
 /// Minimal EVM step that contains only PC (program counter).

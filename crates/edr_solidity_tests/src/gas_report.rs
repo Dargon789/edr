@@ -1,0 +1,267 @@
+//! Gas reports.
+
+use std::{
+    collections::{BTreeMap, HashSet},
+    fmt::Display,
+};
+
+use comfy_table::{presets::ASCII_MARKDOWN, Attribute, Cell, Color, Table};
+use edr_common::calc;
+use edr_gas_report::{
+    ContractGasReport, DeploymentGasReport, FunctionGasReport, GasReportExecutionStatus,
+};
+use edr_primitives::HashMap;
+use foundry_evm::{abi::TestFunctionExt, traces::CallKind};
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    constants::{CHEATCODE_ADDRESS, HARDHAT_CONSOLE_ADDRESS},
+    traces::{CallTraceArena, CallTraceDecoder, CallTraceNode, DecodedCallData},
+};
+
+/// Represents the gas report for a set of contracts.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct GasReport {
+    /// Whether to report any contracts.
+    report_any: bool,
+    /// Contracts to generate the report for.
+    report_for: HashSet<String>,
+    /// Contracts to ignore when generating the report.
+    ignore: HashSet<String>,
+    /// All contracts that were analyzed grouped by their identifier
+    /// ``test/Counter.t.sol:CounterTest``
+    pub contracts: BTreeMap<String, ContractInfo>,
+}
+
+impl GasReport {
+    pub fn new(
+        report_for: impl IntoIterator<Item = String>,
+        ignore: impl IntoIterator<Item = String>,
+    ) -> Self {
+        let report_for = report_for.into_iter().collect::<HashSet<_>>();
+        let ignore = ignore.into_iter().collect::<HashSet<_>>();
+        let report_any = report_for.is_empty() || report_for.contains("*");
+        Self {
+            report_any,
+            report_for,
+            ignore,
+            ..Default::default()
+        }
+    }
+
+    /// Analyzes the given traces and generates a gas report.
+    pub async fn analyze(
+        &mut self,
+        arenas: impl IntoIterator<Item = &CallTraceArena>,
+        decoder: &CallTraceDecoder,
+    ) {
+        for node in arenas.into_iter().flat_map(CallTraceArena::nodes) {
+            self.analyze_node(node, decoder).await;
+        }
+    }
+
+    async fn analyze_node(&mut self, node: &CallTraceNode, decoder: &CallTraceDecoder) {
+        let trace = &node.trace;
+
+        if trace.address == CHEATCODE_ADDRESS || trace.address == HARDHAT_CONSOLE_ADDRESS {
+            return;
+        }
+
+        // Only include top-level calls which accout for calldata and base (21.000)
+        // cost. Only include Calls and Creates as only these calls are isolated
+        // in inspector.
+        if trace.depth > 1
+            && (trace.kind == CallKind::Call
+                || trace.kind == CallKind::Create
+                || trace.kind == CallKind::Create2)
+        {
+            return;
+        }
+
+        let Some(name) = decoder.contracts.get(&node.trace.address) else {
+            return;
+        };
+        let contract_name = name.rsplit(':').next().unwrap_or(name);
+
+        let decoded = || decoder.decode_function(&node.trace);
+
+        let contract_info = self.contracts.entry(name.clone()).or_default();
+        if trace.kind.is_any_create() {
+            trace!(contract_name, "adding create gas info");
+            contract_info.gas = trace.gas_used;
+            contract_info.size = trace.data.len();
+        } else if let Some(DecodedCallData { signature, .. }) = decoded().await.call_data {
+            let name = signature.split('(').next().unwrap();
+            // Contract deployment status is determined by the setUp function
+            let is_setup = name.test_function_kind().is_setup();
+            // Ignore any test functions
+            let should_include = !name.test_function_kind().is_known();
+            let status = if trace.is_revert() {
+                GasReportExecutionStatus::Revert
+            } else if trace.is_error() {
+                GasReportExecutionStatus::Halt
+            } else {
+                GasReportExecutionStatus::Success
+            };
+
+            if is_setup {
+                contract_info.status = status;
+            } else if should_include {
+                trace!(contract_name, signature, "adding gas info");
+                let gas_info = contract_info
+                    .functions
+                    .entry(name.to_string())
+                    .or_default()
+                    .entry(signature.clone())
+                    .or_default();
+                gas_info.calls.push((trace.gas_used, status));
+            }
+        }
+    }
+
+    /// Finalizes the gas report by calculating the min, max, mean, and median
+    /// for each function.
+    #[must_use]
+    pub fn finalize(mut self) -> Self {
+        trace!("finalizing gas report");
+        for contract in self.contracts.values_mut() {
+            for sigs in contract.functions.values_mut() {
+                for func in sigs.values_mut() {
+                    let mut calls_gas = func.calls.iter().map(|(g, _)| *g).collect::<Vec<_>>();
+                    calls_gas.sort_unstable();
+                    func.min = calls_gas.first().copied().unwrap_or_default();
+                    func.max = calls_gas.last().copied().unwrap_or_default();
+                    func.mean = calc::mean(&calls_gas);
+                    func.median = calc::median_sorted(&calls_gas);
+                }
+            }
+        }
+        self
+    }
+}
+
+impl Display for GasReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        for (name, contract) in &self.contracts {
+            if contract.functions.is_empty() {
+                trace!(name, "gas report contract without functions");
+                continue;
+            }
+
+            let mut table = Table::new();
+            table.load_preset(ASCII_MARKDOWN);
+            table.set_header([Cell::new(format!("{name} contract"))
+                .add_attribute(Attribute::Bold)
+                .fg(Color::Green)]);
+            table.add_row([
+                Cell::new("Deployment Cost")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Cyan),
+                Cell::new("Deployment Size")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Cyan),
+            ]);
+            table.add_row([contract.gas.to_string(), contract.size.to_string()]);
+
+            table.add_row([
+                Cell::new("Function Name")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Magenta),
+                Cell::new("min")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Green),
+                Cell::new("avg")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Yellow),
+                Cell::new("median")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Yellow),
+                Cell::new("max")
+                    .add_attribute(Attribute::Bold)
+                    .fg(Color::Red),
+                Cell::new("# calls").add_attribute(Attribute::Bold),
+            ]);
+            contract.functions.iter().for_each(|(fname, sigs)| {
+                for (sig, gas_info) in sigs.iter() {
+                    // show function signature if overloaded else name
+                    let fn_display = if sigs.len() == 1 {
+                        fname.clone()
+                    } else {
+                        sig.replace(':', "")
+                    };
+
+                    table.add_row([
+                        Cell::new(fn_display).add_attribute(Attribute::Bold),
+                        Cell::new(gas_info.min.to_string()).fg(Color::Green),
+                        Cell::new(gas_info.mean.to_string()).fg(Color::Yellow),
+                        Cell::new(gas_info.median.to_string()).fg(Color::Yellow),
+                        Cell::new(gas_info.max.to_string()).fg(Color::Red),
+                        Cell::new(gas_info.calls.len().to_string()),
+                    ]);
+                }
+            });
+            writeln!(f, "{table}")?;
+            writeln!(f, "\n")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ContractInfo {
+    pub gas: u64,
+    pub size: usize,
+    pub status: GasReportExecutionStatus,
+    /// Function name -> Function signature -> `GasInfo`
+    pub functions: BTreeMap<String, BTreeMap<String, GasInfo>>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct GasInfo {
+    pub calls: Vec<(u64, GasReportExecutionStatus)>,
+    pub min: u64,
+    pub mean: u64,
+    pub median: u64,
+    pub max: u64,
+}
+
+impl From<GasReport> for edr_gas_report::GasReport {
+    fn from(value: GasReport) -> Self {
+        let contracts = value
+            .contracts
+            .into_iter()
+            .map(|(contract_name, contract)| {
+                let deployments = vec![DeploymentGasReport {
+                    gas: contract.gas,
+                    size: contract.size as u64,
+                    status: contract.status,
+                }];
+
+                let mut functions = HashMap::default();
+                contract.functions.iter().for_each(|(_, sigs)| {
+                    for (sig, gas_info) in sigs.iter() {
+                        let reports = gas_info
+                            .calls
+                            .iter()
+                            .map(|(gas, status)| FunctionGasReport {
+                                gas: *gas,
+                                status: status.clone(),
+                            })
+                            .collect::<Vec<_>>();
+
+                        functions.insert(sig.clone(), reports);
+                    }
+                });
+                (
+                    contract_name,
+                    ContractGasReport {
+                        deployments,
+                        functions,
+                    },
+                )
+            })
+            .collect();
+
+        Self { contracts }
+    }
+}

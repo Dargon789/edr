@@ -1,33 +1,30 @@
-use std::{convert::Infallible, num::NonZeroU64, time::SystemTime};
+use core::fmt::Debug;
+use std::{num::NonZeroU64, sync::Arc, time::SystemTime};
 
 use anyhow::anyhow;
-#[allow(deprecated)]
-// This is test code, it's ok to use `DangerousSecretKeyStr`
-use edr_eth::{
-    block::{miner_reward, BlobGas, BlockOptions},
-    receipt::BlockReceipt,
-    signature::{secret_key_from_str, DangerousSecretKeyStr},
-    spec::chain_hardfork_activations,
-    transaction::EthTransactionRequest,
-    trie::KECCAK_NULL_RLP,
-    withdrawal::Withdrawal,
-    Address, Bytes, HashMap, PreEip1898BlockSpec, SpecId, B256, U256,
+use edr_block_api::Block as _;
+use edr_block_header::{BlobGas, BlockHeader, HeaderOverrides};
+use edr_chain_l1::{
+    rpc::{receipt::L1RpcTransactionReceipt, TransactionRequest},
+    L1ChainSpec,
 };
-use edr_evm::{
-    alloy_primitives::U160,
-    blockchain::{Blockchain as _, ForkedBlockchain},
-    chain_spec::L1ChainSpec,
-    state::IrregularState,
-    Block, BlockBuilder, CfgEnv, CfgEnvWithHandlerCfg, DebugContext, ExecutionResultWithContext,
-    IntoRemoteBlock, RandomHashGenerator,
-};
-use edr_rpc_eth::client::EthRpcClient;
+use edr_chain_spec::TransactionValidation;
+use edr_primitives::{Address, Bytes, HashMap, B256, KECCAK_NULL_RLP, U160, U256};
+use edr_signer::{public_key_to_address, secret_key_from_str, SignatureWithYParity};
+use edr_solidity::contract_decoder::ContractDecoder;
+use edr_transaction::{request::TransactionRequestAndSender, TxKind};
+use k256::SecretKey;
+use parking_lot::RwLock;
+use tokio::runtime;
 
-use super::{
-    AccountConfig, Arc, Debug, MethodInvocation, Provider, ProviderConfig, ProviderData,
-    ProviderError, ProviderRequest, TimeSinceEpoch,
+use crate::{
+    config,
+    error::ProviderErrorForChainSpec,
+    observability::ObservabilityConfig,
+    time::{CurrentTime, TimeSinceEpoch},
+    AccountOverride, ForkConfig, MethodInvocation, NoopLogger, Provider, ProviderConfig,
+    ProviderData, ProviderRequest, ProviderSpec, SyncProviderSpec,
 };
-use crate::{config::MiningConfig, requests::hardhat::rpc_types::ForkConfig};
 
 pub const TEST_SECRET_KEY: &str =
     "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -38,296 +35,390 @@ pub const TEST_SECRET_KEY_SIGN_TYPED_DATA_V4: &str =
 
 pub const FORK_BLOCK_NUMBER: u64 = 18_725_000;
 
-/// Constructs a test config with a single account with 1 ether
-pub fn create_test_config() -> ProviderConfig {
-    create_test_config_with_fork(None)
+/// Constructs a test config in local mode with configured accounts
+pub fn create_test_config<HardforkT: Default>() -> ProviderConfig<HardforkT> {
+    create_test_config_with(MinimalProviderConfig::local_with_accounts())
+}
+
+/// Default base header overrides for replaying L1 blocks.
+pub fn l1_base_header_overrides(
+    replay_header: &BlockHeader,
+) -> HeaderOverrides<edr_chain_spec::EvmSpecId> {
+    HeaderOverrides {
+        // Extra_data field in L1 has arbitrary additional data
+        extra_data: Some(replay_header.extra_data.clone()),
+        ..header_overrides(replay_header)
+    }
+}
+
+/// Default header overrides for replaying L1 blocks before The Merge
+pub fn l1_header_overrides_before_merge(
+    replay_header: &BlockHeader,
+) -> HeaderOverrides<edr_chain_spec::EvmSpecId> {
+    HeaderOverrides {
+        nonce: Some(replay_header.nonce),
+        ..l1_base_header_overrides(replay_header)
+    }
+}
+
+/// Default header overrides for replaying L1 blocks after Prague hardfork.
+pub fn prague_header_overrides(
+    replay_header: &BlockHeader,
+) -> HeaderOverrides<edr_chain_spec::EvmSpecId> {
+    HeaderOverrides {
+        // EDR does not compute the `requests_hash`, as full support for EIP-7685 introduced in
+        // Prague is not implemented.
+        requests_hash: replay_header.requests_hash,
+        ..l1_base_header_overrides(replay_header)
+    }
+}
+
+/// Default header overrides for replaying blocks.
+pub fn header_overrides<HardforkT: Default>(
+    replay_header: &BlockHeader,
+) -> HeaderOverrides<HardforkT> {
+    HeaderOverrides {
+        beneficiary: Some(replay_header.beneficiary),
+        gas_limit: Some(replay_header.gas_limit),
+        mix_hash: Some(replay_header.mix_hash),
+        parent_beacon_block_root: replay_header.parent_beacon_block_root,
+        state_root: Some(replay_header.state_root),
+        timestamp: Some(replay_header.timestamp),
+        ..HeaderOverrides::<HardforkT>::default()
+    }
 }
 
 pub fn one_ether() -> U256 {
     U256::from(10).pow(U256::from(18))
 }
 
-pub fn create_test_config_with_fork(fork: Option<ForkConfig>) -> ProviderConfig {
-    ProviderConfig {
-        accounts: vec![
-            AccountConfig {
-                // This is test code, it's ok to use `DangerousSecretKeyStr`
-                // Can't use `edr_test_utils` as a dependency here.
-                #[allow(deprecated)]
-                secret_key: secret_key_from_str(DangerousSecretKeyStr(TEST_SECRET_KEY))
-                    .expect("should construct secret key from string"),
-                balance: one_ether(),
-            },
-            AccountConfig {
-                // This is test code, it's ok to use `DangerousSecretKeyStr`
-                // Can't use `edr_test_utils` as a dependency here.
-                #[allow(deprecated)]
-                secret_key: secret_key_from_str(DangerousSecretKeyStr(
-                    TEST_SECRET_KEY_SIGN_TYPED_DATA_V4,
-                ))
+/// Sets the [`ProviderConfig`]'s owned accounts and genesis state - computed by
+/// funding each account with the provided `balance`.
+pub fn set_genesis_state_with_owned_accounts<HardforkT>(
+    config: &mut ProviderConfig<HardforkT>,
+    owned_accounts: Vec<SecretKey>,
+    balance: U256,
+) {
+    config.genesis_state = genesis_state_with_funded_owned_accounts(&owned_accounts, balance);
+    config.owned_accounts = owned_accounts;
+}
+
+pub struct MinimalProviderConfig<HardforkT> {
+    fork: Option<ForkConfig<HardforkT>>,
+    genesis_state: HashMap<Address, AccountOverride>,
+    observability: Option<ObservabilityConfig>,
+    owned_accounts: Vec<SecretKey>,
+}
+
+impl<HardforkT> MinimalProviderConfig<HardforkT> {
+    /// Fork minimal configuration without custom `owned_accounts` or
+    /// `genesis_state`
+    pub fn fork_empty(fork_config: ForkConfig<HardforkT>) -> MinimalProviderConfig<HardforkT> {
+        MinimalProviderConfig {
+            fork: Some(fork_config),
+            genesis_state: HashMap::default(),
+            observability: None,
+            owned_accounts: vec![],
+        }
+    }
+
+    /// Local minimal configuration without custom `owned_accounts` or
+    /// `genesis_state`
+    pub fn local_empty() -> MinimalProviderConfig<HardforkT> {
+        MinimalProviderConfig {
+            fork: None,
+            genesis_state: HashMap::default(),
+            observability: None,
+            owned_accounts: vec![],
+        }
+    }
+
+    /// Fork minimal configuration with default custom `owned_accounts` or
+    /// `genesis_state`
+    pub fn fork_with_accounts(
+        fork_config: ForkConfig<HardforkT>,
+    ) -> MinimalProviderConfig<HardforkT> {
+        let owned_accounts = Self::default_accounts();
+        MinimalProviderConfig {
+            fork: Some(fork_config),
+            genesis_state: genesis_state_with_funded_owned_accounts(&owned_accounts, one_ether()),
+            observability: None,
+            owned_accounts,
+        }
+    }
+    /// Local minimal configuration with default custom `owned_accounts` or
+    /// `genesis_state`
+    pub fn local_with_accounts() -> MinimalProviderConfig<HardforkT> {
+        let owned_accounts = Self::default_accounts();
+        MinimalProviderConfig {
+            fork: None,
+            genesis_state: genesis_state_with_funded_owned_accounts(&owned_accounts, one_ether()),
+            observability: None,
+            owned_accounts,
+        }
+    }
+
+    /// Adds the provided `observability_config` to the instance.
+    pub fn with_observability(&mut self, observability_config: ObservabilityConfig) {
+        self.observability = Some(observability_config);
+    }
+
+    fn default_accounts() -> Vec<SecretKey> {
+        // This is test code, it's ok to use `DangerousSecretKeyStr`
+        #[allow(deprecated)]
+        use edr_signer::DangerousSecretKeyStr;
+
+        // This is test code, it's ok to use `DangerousSecretKeyStr`
+        // Can't use `edr_test_utils` as a dependency here.
+        vec![
+            #[allow(deprecated)]
+            secret_key_from_str(DangerousSecretKeyStr(TEST_SECRET_KEY))
                 .expect("should construct secret key from string"),
-                balance: one_ether(),
-            },
-        ],
+            #[allow(deprecated)]
+            secret_key_from_str(DangerousSecretKeyStr(TEST_SECRET_KEY_SIGN_TYPED_DATA_V4))
+                .expect("should construct secret key from string"),
+        ]
+    }
+}
+
+pub fn create_test_config_with<HardforkT: Default>(
+    config: MinimalProviderConfig<HardforkT>,
+) -> ProviderConfig<HardforkT> {
+    ProviderConfig {
         allow_blocks_with_same_timestamp: false,
         allow_unlimited_contract_size: false,
         bail_on_call_failure: false,
         bail_on_transaction_failure: false,
+        base_fee_params: None,
         // SAFETY: literal is non-zero
         block_gas_limit: unsafe { NonZeroU64::new_unchecked(30_000_000) },
         chain_id: 123,
-        chains: HashMap::new(),
         coinbase: Address::from(U160::from(1)),
-        enable_rip_7212: false,
-        fork,
-        genesis_accounts: HashMap::new(),
-        hardfork: SpecId::LATEST,
-        initial_base_fee_per_gas: Some(U256::from(1000000000)),
+        fork: config.fork,
+        genesis_state: config.genesis_state,
+        hardfork: HardforkT::default(),
+        initial_base_fee_per_gas: Some(1000000000),
         initial_blob_gas: Some(BlobGas {
             gas_used: 0,
             excess_gas: 0,
         }),
         initial_date: Some(SystemTime::now()),
         initial_parent_beacon_block_root: Some(KECCAK_NULL_RLP),
-        min_gas_price: U256::ZERO,
-        mining: MiningConfig::default(),
+        min_gas_price: 0,
+        mining: config::Mining::default(),
         network_id: 123,
-        cache_dir: edr_defaults::CACHE_DIR.into(),
+        observability: config.observability.unwrap_or_default(),
+        owned_accounts: config.owned_accounts,
+        precompile_overrides: HashMap::default(),
+        transaction_gas_cap: None,
     }
 }
-
 /// Retrieves the pending base fee per gas from the provider data.
-pub fn pending_base_fee(
-    data: &mut ProviderData<Infallible>,
-) -> Result<U256, ProviderError<Infallible>> {
-    let block = data.mine_pending_block()?.block;
+pub fn pending_base_fee<
+    ChainSpecT: SyncProviderSpec<
+        TimerT,
+        SignedTransaction: Default + TransactionValidation<ValidationError: PartialEq>,
+    >,
+    TimerT: Clone + TimeSinceEpoch,
+>(
+    data: &mut ProviderData<ChainSpecT, TimerT>,
+) -> Result<u128, ProviderErrorForChainSpec<ChainSpecT>> {
+    let block = data.mine_pending_block()?.block_and_state.block;
 
-    let base_fee = block
-        .header()
-        .base_fee_per_gas
-        .unwrap_or_else(|| U256::from(1));
+    let base_fee = block.block_header().base_fee_per_gas.unwrap_or(1);
 
     Ok(base_fee)
 }
 
 /// Deploys a contract with the provided code. Returns the address of the
 /// contract.
-pub fn deploy_contract<LoggerErrorT, TimerT>(
-    provider: &Provider<LoggerErrorT, TimerT>,
+pub fn deploy_contract<TimerT>(
+    provider: &Provider<L1ChainSpec, TimerT>,
     caller: Address,
     code: Bytes,
 ) -> anyhow::Result<Address>
 where
-    LoggerErrorT: Debug + Send + Sync + 'static,
     TimerT: Clone + TimeSinceEpoch,
 {
-    let deploy_transaction = EthTransactionRequest {
+    let deploy_transaction = TransactionRequest {
         from: caller,
         data: Some(code),
-        ..EthTransactionRequest::default()
+        ..TransactionRequest::default()
     };
 
-    let result = provider.handle_request(ProviderRequest::Single(
+    let result = provider.handle_request(ProviderRequest::with_single(
         MethodInvocation::SendTransaction(deploy_transaction),
     ))?;
 
     let transaction_hash: B256 = serde_json::from_value(result.result)?;
 
-    let result = provider.handle_request(ProviderRequest::Single(
+    let result = provider.handle_request(ProviderRequest::with_single(
         MethodInvocation::GetTransactionReceipt(transaction_hash),
     ))?;
 
-    let receipt: BlockReceipt = serde_json::from_value(result.result)?;
+    let receipt: L1RpcTransactionReceipt = serde_json::from_value(result.result)?;
     let contract_address = receipt.contract_address.expect("Call must create contract");
 
     Ok(contract_address)
 }
 
-/// Runs a full remote block, asserting that the mined block matches the remote
-/// block.
-pub async fn run_full_block(url: String, block_number: u64, chain_id: u64) -> anyhow::Result<()> {
-    let runtime = tokio::runtime::Handle::current();
-    let default_config = create_test_config_with_fork(Some(ForkConfig {
-        json_rpc_url: url.clone(),
-        block_number: Some(block_number - 1),
-        http_headers: None,
-    }));
+/// Fixture for testing `ProviderData`.
+pub struct ProviderTestFixture<ChainSpecT: ProviderSpec<CurrentTime>> {
+    _runtime: runtime::Runtime,
+    pub config: ProviderConfig<ChainSpecT::Hardfork>,
+    pub provider_data: ProviderData<ChainSpecT, CurrentTime>,
+    pub impersonated_account: Address,
+}
 
-    let replay_block = {
-        let rpc_client =
-            EthRpcClient::<L1ChainSpec>::new(&url, default_config.cache_dir.clone(), None)?;
-
-        let block = rpc_client
-            .get_block_by_number_with_transaction_data(PreEip1898BlockSpec::Number(block_number))
-            .await?;
-
-        block.into_remote_block(Arc::new(rpc_client), runtime.clone())?
-    };
-
-    let rpc_client =
-        EthRpcClient::<L1ChainSpec>::new(&url, default_config.cache_dir.clone(), None)?;
-    let mut irregular_state = IrregularState::default();
-    let state_root_generator = Arc::new(parking_lot::Mutex::new(RandomHashGenerator::with_seed(
-        edr_defaults::STATE_ROOT_HASH_SEED,
-    )));
-    let hardfork_activation_overrides = HashMap::new();
-
-    let hardfork_activations =
-        chain_hardfork_activations(chain_id).ok_or(anyhow!("Unsupported chain id"))?;
-
-    let spec_id = hardfork_activations
-        .hardfork_at_block_number(block_number)
-        .ok_or(anyhow!("Unsupported block number"))?;
-
-    let blockchain = ForkedBlockchain::new(
-        runtime.clone(),
-        Some(chain_id),
-        spec_id,
-        Arc::new(rpc_client),
-        Some(block_number - 1),
-        &mut irregular_state,
-        state_root_generator,
-        &hardfork_activation_overrides,
-    )
-    .await?;
-
-    let mut cfg = CfgEnv::default();
-    cfg.chain_id = chain_id;
-    cfg.disable_eip3607 = true;
-
-    let cfg = CfgEnvWithHandlerCfg::new_with_spec_id(cfg, spec_id);
-
-    let parent = blockchain.last_block()?;
-    let replay_header = replay_block.header();
-
-    let mut builder = BlockBuilder::new(
-        cfg,
-        &parent,
-        BlockOptions {
-            beneficiary: Some(replay_header.beneficiary),
-            gas_limit: Some(replay_header.gas_limit),
-            extra_data: Some(replay_header.extra_data.clone()),
-            mix_hash: Some(replay_header.mix_hash),
-            nonce: Some(replay_header.nonce),
-            parent_beacon_block_root: replay_header.parent_beacon_block_root,
-            state_root: Some(replay_header.state_root),
-            timestamp: Some(replay_header.timestamp),
-            withdrawals: replay_block.withdrawals().map(<[Withdrawal]>::to_vec),
-            ..BlockOptions::default()
-        },
-        None,
-    )?;
-
-    let mut state =
-        blockchain.state_at_block_number(block_number - 1, irregular_state.state_overrides())?;
-
-    for transaction in replay_block.transactions() {
-        let debug_context: Option<DebugContext<'_, L1ChainSpec, _, (), _>> = None;
-        let ExecutionResultWithContext {
-            result,
-            evm_context: _,
-        } = builder.add_transaction(&blockchain, &mut state, transaction.clone(), debug_context);
-
-        result?;
+impl<ChainSpecT> ProviderTestFixture<ChainSpecT>
+where
+    ChainSpecT: Debug + SyncProviderSpec<CurrentTime, Hardfork: Default>,
+{
+    /// Creates a new `ProviderTestFixture` with a local provider.
+    pub fn new_local() -> anyhow::Result<Self> {
+        Self::with_config(MinimalProviderConfig::local_with_accounts())
     }
 
-    let rewards = vec![(
-        replay_header.beneficiary,
-        miner_reward(spec_id).unwrap_or(U256::ZERO),
-    )];
-    let mined_block = builder.finalize(&mut state, rewards)?;
+    /// Creates a new `ProviderTestFixture` with a forked provider.
+    pub fn new_forked(url: Option<String>) -> anyhow::Result<Self> {
+        use edr_test_utils::env::json_rpc_url_provider;
 
-    let mined_header = mined_block.block.header();
-    for (expected, actual) in replay_block
-        .transaction_receipts()?
-        .into_iter()
-        .zip(mined_block.block.transaction_receipts().iter())
-    {
-        debug_assert_eq!(
-            expected.block_number,
-            actual.block_number,
-            "{:?}",
-            replay_block.transactions()[expected.transaction_index as usize]
-        );
-        debug_assert_eq!(
-            expected.transaction_hash,
-            actual.transaction_hash,
-            "{:?}",
-            replay_block.transactions()[expected.transaction_index as usize]
-        );
-        debug_assert_eq!(
-            expected.transaction_index,
-            actual.transaction_index,
-            "{:?}",
-            replay_block.transactions()[expected.transaction_index as usize]
-        );
-        debug_assert_eq!(
-            expected.from,
-            actual.from,
-            "{:?}",
-            replay_block.transactions()[expected.transaction_index as usize]
-        );
-        debug_assert_eq!(
-            expected.to,
-            actual.to,
-            "{:?}",
-            replay_block.transactions()[expected.transaction_index as usize]
-        );
-        debug_assert_eq!(
-            expected.contract_address,
-            actual.contract_address,
-            "{:?}",
-            replay_block.transactions()[expected.transaction_index as usize]
-        );
-        debug_assert_eq!(
-            expected.gas_used,
-            actual.gas_used,
-            "{:?}",
-            replay_block.transactions()[expected.transaction_index as usize]
-        );
-        debug_assert_eq!(
-            expected.effective_gas_price,
-            actual.effective_gas_price,
-            "{:?}",
-            replay_block.transactions()[expected.transaction_index as usize]
-        );
-        debug_assert_eq!(
-            expected.cumulative_gas_used,
-            actual.cumulative_gas_used,
-            "{:?}",
-            replay_block.transactions()[expected.transaction_index as usize]
-        );
-        if expected.logs_bloom != actual.logs_bloom {
-            for (expected, actual) in expected.logs.iter().zip(actual.logs.iter()) {
-                debug_assert_eq!(
-                    expected.inner.address,
-                    actual.inner.address,
-                    "{:?}",
-                    replay_block.transactions()[expected.transaction_index as usize]
-                );
-                debug_assert_eq!(
-                    expected.inner.topics(),
-                    actual.inner.topics(),
-                    "{:?}",
-                    replay_block.transactions()[expected.transaction_index as usize]
-                );
-                debug_assert_eq!(
-                    expected.inner.data.data,
-                    actual.inner.data.data,
-                    "{:?}",
-                    replay_block.transactions()[expected.transaction_index as usize]
-                );
-            }
-        }
-        debug_assert_eq!(
-            expected.data,
-            actual.data,
-            "{:?}",
-            replay_block.transactions()[expected.transaction_index as usize]
-        );
+        Self::with_config(MinimalProviderConfig::fork_with_accounts(ForkConfig {
+            block_number: None,
+            cache_dir: edr_defaults::CACHE_DIR.into(),
+            chain_overrides: HashMap::default(),
+            http_headers: None,
+            url: url.unwrap_or(json_rpc_url_provider::ethereum_mainnet()),
+        }))
     }
 
-    assert_eq!(mined_header, replay_header);
+    fn with_config(config: MinimalProviderConfig<ChainSpecT::Hardfork>) -> anyhow::Result<Self> {
+        let config = create_test_config_with(config);
 
-    Ok(())
+        let runtime = runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .thread_name("provider-data-test")
+            .build()?;
+
+        Self::new(runtime, config)
+    }
+
+    pub fn new(
+        runtime: tokio::runtime::Runtime,
+        mut config: ProviderConfig<ChainSpecT::Hardfork>,
+    ) -> anyhow::Result<Self> {
+        let logger = Box::<NoopLogger<ChainSpecT, CurrentTime>>::default();
+        let subscription_callback_noop = Box::new(|_| ());
+
+        let impersonated_account = Address::random();
+        config.genesis_state.insert(
+            impersonated_account,
+            AccountOverride {
+                balance: Some(one_ether()),
+                ..AccountOverride::default()
+            },
+        );
+
+        let mut provider_data = ProviderData::<ChainSpecT>::new(
+            runtime.handle().clone(),
+            logger,
+            subscription_callback_noop,
+            config.clone(),
+            Arc::new(RwLock::<ContractDecoder>::default()),
+            CurrentTime,
+        )?;
+
+        provider_data.impersonate_account(impersonated_account);
+
+        Ok(Self {
+            _runtime: runtime,
+            config,
+            provider_data,
+            impersonated_account,
+        })
+    }
+
+    /// Retrieves the nth local account.
+    ///
+    /// # Panics
+    ///
+    /// Panics if there are not enough local accounts
+    pub fn nth_local_account(&self, index: usize) -> anyhow::Result<Address> {
+        self.provider_data
+            .accounts()
+            .nth(index)
+            .copied()
+            .ok_or(anyhow!("the requested local account does not exist"))
+    }
+}
+
+impl ProviderTestFixture<L1ChainSpec> {
+    pub fn dummy_transaction_request(
+        &self,
+        local_account_index: usize,
+        gas_limit: u64,
+        nonce: Option<u64>,
+    ) -> anyhow::Result<TransactionRequestAndSender<edr_chain_l1::L1TransactionRequest>> {
+        let request = edr_chain_l1::L1TransactionRequest::Eip155(edr_chain_l1::request::Eip155 {
+            kind: TxKind::Call(Address::ZERO),
+            gas_limit,
+            gas_price: 42_000_000_000_u128,
+            value: U256::from(1),
+            input: Bytes::default(),
+            nonce: nonce.unwrap_or(0),
+            chain_id: self.config.chain_id,
+        });
+
+        let sender = self.nth_local_account(local_account_index)?;
+        Ok(TransactionRequestAndSender { request, sender })
+    }
+
+    pub fn impersonated_dummy_transaction(
+        &self,
+    ) -> anyhow::Result<edr_chain_l1::L1SignedTransaction> {
+        let mut transaction = self.dummy_transaction_request(0, 30_000, None)?;
+        transaction.sender = self.impersonated_account;
+
+        Ok(self.provider_data.sign_transaction_request(transaction)?)
+    }
+
+    pub fn signed_dummy_transaction(
+        &self,
+        local_account_index: usize,
+        nonce: Option<u64>,
+    ) -> anyhow::Result<edr_chain_l1::L1SignedTransaction> {
+        let transaction = self.dummy_transaction_request(local_account_index, 30_000, nonce)?;
+        Ok(self.provider_data.sign_transaction_request(transaction)?)
+    }
+}
+
+/// Signs an authorization with the provided secret key.
+pub fn sign_authorization(
+    authorization: edr_eip7702::Authorization,
+    secret_key: &SecretKey,
+) -> anyhow::Result<edr_eip7702::SignedAuthorization> {
+    let signature = SignatureWithYParity::with_message(authorization.signature_hash(), secret_key)?;
+
+    Ok(authorization.into_signed(signature.into_inner()))
+}
+
+/// Constructs a genesis state by funding the owned accounts with the provided
+/// `balance`.
+fn genesis_state_with_funded_owned_accounts(
+    owned_accounts: &[SecretKey],
+    balance: U256,
+) -> HashMap<Address, AccountOverride> {
+    owned_accounts
+        .iter()
+        .map(|secret_key| {
+            let address = public_key_to_address(secret_key.public_key());
+            let account_override = AccountOverride {
+                balance: Some(balance),
+                ..AccountOverride::default()
+            };
+
+            (address, account_override)
+        })
+        .collect()
 }

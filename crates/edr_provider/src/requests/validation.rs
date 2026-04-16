@@ -1,215 +1,267 @@
-use core::fmt::Debug;
+use edr_chain_l1::rpc::{call::L1CallRequest, TransactionRequest};
+use edr_chain_spec::{EvmSpecId, ExecutableTransaction};
+use edr_eth::{Blob, BlockSpec, BlockTag, PreEip1898BlockSpec};
+use edr_primitives::{Address, Bytes, B256, MAX_INITCODE_SIZE};
 
-use edr_eth::{
-    eips::eip7702,
-    transaction::{self, EthTransactionRequest},
-    AccessListItem, Address, BlockSpec, BlockTag, PreEip1898BlockSpec, SpecId, B256, U256,
+use crate::{
+    data::ProviderData, error::ProviderErrorForChainSpec, spec::HardforkValidationData,
+    time::TimeSinceEpoch, ProviderError, ProviderSpec, SyncProviderSpec,
 };
-use edr_evm::Bytes;
-use edr_rpc_eth::CallRequest;
 
-use crate::ProviderError;
+impl HardforkValidationData for TransactionRequest {
+    fn to(&self) -> Option<&Address> {
+        self.to.as_ref()
+    }
 
-/// Data used for validating a transaction complies with a [`SpecId`].
-pub struct SpecValidationData<'data> {
-    pub to: Option<&'data Address>,
-    pub gas_price: Option<&'data U256>,
-    pub max_fee_per_gas: Option<&'data U256>,
-    pub max_priority_fee_per_gas: Option<&'data U256>,
-    pub access_list: Option<&'data Vec<AccessListItem>>,
-    pub blobs: Option<&'data Vec<Bytes>>,
-    pub blob_hashes: Option<&'data Vec<B256>>,
-    pub authorization_list: Option<&'data Vec<eip7702::SignedAuthorization>>,
+    fn gas_price(&self) -> Option<&u128> {
+        self.gas_price.as_ref()
+    }
+
+    fn max_fee_per_gas(&self) -> Option<&u128> {
+        self.max_fee_per_gas.as_ref()
+    }
+
+    fn max_priority_fee_per_gas(&self) -> Option<&u128> {
+        self.max_priority_fee_per_gas.as_ref()
+    }
+
+    fn access_list(&self) -> Option<&Vec<edr_eip2930::AccessListItem>> {
+        self.access_list.as_ref()
+    }
+
+    fn blobs(&self) -> Option<&Vec<Blob>> {
+        self.blobs.as_ref()
+    }
+
+    fn blob_hashes(&self) -> Option<&Vec<B256>> {
+        self.blob_hashes.as_ref()
+    }
+
+    fn authorization_list(&self) -> Option<&Vec<edr_eip7702::SignedAuthorization>> {
+        self.authorization_list.as_ref()
+    }
 }
 
-impl<'data> From<&'data EthTransactionRequest> for SpecValidationData<'data> {
-    fn from(value: &'data EthTransactionRequest) -> Self {
-        Self {
-            to: value.to.as_ref(),
-            gas_price: value.gas_price.as_ref(),
-            max_fee_per_gas: value.max_fee_per_gas.as_ref(),
-            max_priority_fee_per_gas: value.max_priority_fee_per_gas.as_ref(),
-            access_list: value.access_list.as_ref(),
-            blobs: value.blobs.as_ref(),
-            blob_hashes: value.blob_hashes.as_ref(),
-            authorization_list: value.authorization_list.as_ref(),
+impl HardforkValidationData for L1CallRequest {
+    fn to(&self) -> Option<&Address> {
+        self.to.as_ref()
+    }
+
+    fn gas_price(&self) -> Option<&u128> {
+        self.gas_price.as_ref()
+    }
+
+    fn max_fee_per_gas(&self) -> Option<&u128> {
+        self.max_fee_per_gas.as_ref()
+    }
+
+    fn max_priority_fee_per_gas(&self) -> Option<&u128> {
+        self.max_priority_fee_per_gas.as_ref()
+    }
+
+    fn access_list(&self) -> Option<&Vec<edr_eip2930::AccessListItem>> {
+        self.access_list.as_ref()
+    }
+
+    fn blobs(&self) -> Option<&Vec<Blob>> {
+        self.blobs.as_ref()
+    }
+
+    fn blob_hashes(&self) -> Option<&Vec<B256>> {
+        self.blob_hashes.as_ref()
+    }
+
+    fn authorization_list(&self) -> Option<&Vec<edr_eip7702::SignedAuthorization>> {
+        self.authorization_list.as_ref()
+    }
+}
+
+impl HardforkValidationData for edr_chain_l1::L1PooledTransaction {
+    fn to(&self) -> Option<&Address> {
+        Some(self.caller())
+    }
+
+    fn gas_price(&self) -> Option<&u128> {
+        match self {
+            edr_chain_l1::L1PooledTransaction::PreEip155Legacy(tx) => Some(&tx.gas_price),
+            edr_chain_l1::L1PooledTransaction::PostEip155Legacy(tx) => Some(&tx.gas_price),
+            edr_chain_l1::L1PooledTransaction::Eip2930(tx) => Some(&tx.gas_price),
+            edr_chain_l1::L1PooledTransaction::Eip1559(_)
+            | edr_chain_l1::L1PooledTransaction::Eip4844(_)
+            | edr_chain_l1::L1PooledTransaction::Eip7702(_) => None,
+        }
+    }
+
+    fn max_fee_per_gas(&self) -> Option<&u128> {
+        ExecutableTransaction::max_fee_per_gas(self)
+    }
+
+    fn max_priority_fee_per_gas(&self) -> Option<&u128> {
+        ExecutableTransaction::max_priority_fee_per_gas(self)
+    }
+
+    fn access_list(&self) -> Option<&Vec<edr_eip2930::AccessListItem>> {
+        match self {
+            edr_chain_l1::L1PooledTransaction::PreEip155Legacy(_)
+            | edr_chain_l1::L1PooledTransaction::PostEip155Legacy(_) => None,
+            edr_chain_l1::L1PooledTransaction::Eip2930(tx) => Some(tx.access_list.0.as_ref()),
+            edr_chain_l1::L1PooledTransaction::Eip1559(tx) => Some(tx.access_list.0.as_ref()),
+            edr_chain_l1::L1PooledTransaction::Eip4844(tx) => Some(&tx.payload().access_list),
+            edr_chain_l1::L1PooledTransaction::Eip7702(tx) => Some(tx.access_list.0.as_ref()),
+        }
+    }
+
+    fn blobs(&self) -> Option<&Vec<Blob>> {
+        match self {
+            edr_chain_l1::L1PooledTransaction::Eip4844(tx) => Some(tx.blobs_ref()),
+            _ => None,
+        }
+    }
+
+    fn blob_hashes(&self) -> Option<&Vec<B256>> {
+        match self {
+            edr_chain_l1::L1PooledTransaction::Eip4844(tx) => Some(&tx.payload().blob_hashes),
+            _ => None,
+        }
+    }
+
+    fn authorization_list(&self) -> Option<&Vec<edr_eip7702::SignedAuthorization>> {
+        match self {
+            edr_chain_l1::L1PooledTransaction::Eip7702(tx) => Some(tx.authorization_list.as_ref()),
+            _ => None,
         }
     }
 }
 
-impl<'data> From<&'data CallRequest> for SpecValidationData<'data> {
-    fn from(value: &'data CallRequest) -> Self {
-        Self {
-            to: value.to.as_ref(),
-            gas_price: value.gas_price.as_ref(),
-            max_fee_per_gas: value.max_fee_per_gas.as_ref(),
-            max_priority_fee_per_gas: value.max_priority_fee_per_gas.as_ref(),
-            access_list: value.access_list.as_ref(),
-            blobs: value.blobs.as_ref(),
-            blob_hashes: value.blob_hashes.as_ref(),
-            authorization_list: value.authorization_list.as_ref(),
+/// Validates a `TransactionRequest` against the provided `ProviderData`.
+pub fn validate_send_transaction_request<
+    ChainSpecT: SyncProviderSpec<TimerT>,
+    TimerT: Clone + TimeSinceEpoch,
+>(
+    data: &ProviderData<ChainSpecT, TimerT>,
+    request: &TransactionRequest,
+) -> Result<(), ProviderErrorForChainSpec<ChainSpecT>> {
+    if let Some(chain_id) = request.chain_id {
+        let expected = data.chain_id();
+        if chain_id != expected {
+            return Err(ProviderError::InvalidChainId {
+                expected,
+                actual: chain_id,
+            });
         }
     }
-}
 
-impl<'data> From<&'data transaction::Signed> for SpecValidationData<'data> {
-    fn from(value: &'data transaction::Signed) -> Self {
-        match value {
-            transaction::Signed::PreEip155Legacy(tx) => Self {
-                to: tx.kind.to(),
-                gas_price: Some(&tx.gas_price),
-                max_fee_per_gas: None,
-                max_priority_fee_per_gas: None,
-                access_list: None,
-                blobs: None,
-                blob_hashes: None,
-                authorization_list: None,
-            },
-            transaction::Signed::PostEip155Legacy(tx) => Self {
-                to: tx.kind.to(),
-                gas_price: Some(&tx.gas_price),
-                max_fee_per_gas: None,
-                max_priority_fee_per_gas: None,
-                access_list: None,
-                blobs: None,
-                blob_hashes: None,
-                authorization_list: None,
-            },
-            transaction::Signed::Eip2930(tx) => Self {
-                to: tx.kind.to(),
-                gas_price: Some(&tx.gas_price),
-                max_fee_per_gas: None,
-                max_priority_fee_per_gas: None,
-                access_list: Some(tx.access_list.0.as_ref()),
-                blobs: None,
-                blob_hashes: None,
-                authorization_list: None,
-            },
-            transaction::Signed::Eip1559(tx) => Self {
-                to: tx.kind.to(),
-                gas_price: None,
-                max_fee_per_gas: Some(&tx.max_fee_per_gas),
-                max_priority_fee_per_gas: Some(&tx.max_priority_fee_per_gas),
-                access_list: Some(tx.access_list.0.as_ref()),
-                blobs: None,
-                blob_hashes: None,
-                authorization_list: None,
-            },
-            transaction::Signed::Eip4844(tx) => Self {
-                to: Some(&tx.to),
-                gas_price: None,
-                max_fee_per_gas: Some(&tx.max_fee_per_gas),
-                max_priority_fee_per_gas: Some(&tx.max_priority_fee_per_gas),
-                access_list: Some(tx.access_list.0.as_ref()),
-                blobs: None,
-                blob_hashes: Some(tx.blob_hashes.as_ref()),
-                authorization_list: None,
-            },
-            transaction::Signed::Eip7702(tx) => Self {
-                to: Some(&tx.to),
-                gas_price: None,
-                max_fee_per_gas: Some(&tx.max_fee_per_gas),
-                max_priority_fee_per_gas: Some(&tx.max_priority_fee_per_gas),
-                access_list: Some(tx.access_list.0.as_ref()),
-                blobs: None,
-                blob_hashes: None,
-                authorization_list: Some(tx.authorization_list.as_ref()),
-            },
-        }
+    if let Some(request_data) = &request.data {
+        validate_eip3860_max_initcode_size::<ChainSpecT, TimerT>(
+            data.evm_spec_id(),
+            data.allow_unlimited_initcode_size(),
+            request.to.as_ref(),
+            request_data,
+        )?;
     }
+
+    if request.blob_hashes.is_some() || request.blobs.is_some() {
+        return Err(ProviderError::Eip4844TransactionUnsupported);
+    }
+
+    if let Some(transaction_type) = request.transaction_type
+        && transaction_type == u8::from(edr_chain_l1::L1TransactionType::Eip4844)
+    {
+        return Err(ProviderError::Eip4844TransactionUnsupported);
+    }
+
+    validate_transaction_and_call_request::<ChainSpecT, TimerT>(data.hardfork(), request).map_err(|err| match err {
+        ProviderError::UnsupportedEIP1559Parameters {
+            minimum_hardfork, ..
+        } => ProviderError::InvalidArgument(format!("\
+EIP-1559 style fee params (maxFeePerGas or maxPriorityFeePerGas) received but they are not supported by the current hardfork.
+
+You can use them by running Hardhat Network with 'hardfork' {minimum_hardfork:?} or later.
+        ")),
+        err => err,
+    })
 }
 
-fn validate_transaction_spec<LoggerErrorT: Debug>(
-    spec_id: SpecId,
-    data: SpecValidationData<'_>,
-) -> Result<(), ProviderError<LoggerErrorT>> {
-    let SpecValidationData {
-        to,
-        gas_price,
-        max_fee_per_gas,
-        max_priority_fee_per_gas,
-        access_list,
-        blobs,
-        blob_hashes,
-        authorization_list,
-    } = data;
-
-    if spec_id < SpecId::BERLIN && access_list.is_some() {
+fn validate_transaction_spec<ChainSpecT: ProviderSpec<TimerT>, TimerT: Clone + TimeSinceEpoch>(
+    spec_id: EvmSpecId,
+    value: &impl HardforkValidationData,
+) -> Result<(), ProviderErrorForChainSpec<ChainSpecT>> {
+    if spec_id < EvmSpecId::BERLIN && value.access_list().is_some() {
         return Err(ProviderError::UnsupportedAccessListParameter {
             current_hardfork: spec_id,
-            minimum_hardfork: SpecId::BERLIN,
+            minimum_hardfork: EvmSpecId::BERLIN,
         });
     }
 
-    if spec_id < SpecId::LONDON && (max_fee_per_gas.is_some() || max_priority_fee_per_gas.is_some())
+    if spec_id < EvmSpecId::LONDON
+        && (value.max_fee_per_gas().is_some() || value.max_priority_fee_per_gas().is_some())
     {
         return Err(ProviderError::UnsupportedEIP1559Parameters {
             current_hardfork: spec_id,
-            minimum_hardfork: SpecId::BERLIN,
+            minimum_hardfork: EvmSpecId::BERLIN,
         });
     }
 
-    if spec_id < SpecId::CANCUN && (blobs.is_some() || blob_hashes.is_some()) {
+    if spec_id < EvmSpecId::CANCUN && (value.blobs().is_some() || value.blob_hashes().is_some()) {
         return Err(ProviderError::UnsupportedEIP4844Parameters {
             current_hardfork: spec_id,
-            minimum_hardfork: SpecId::CANCUN,
+            minimum_hardfork: EvmSpecId::CANCUN,
         });
     }
 
-    if spec_id < SpecId::PRAGUE && authorization_list.is_some() {
+    if spec_id < EvmSpecId::PRAGUE && value.authorization_list().is_some() {
         return Err(ProviderError::UnsupportedEip7702Parameters {
             current_hardfork: spec_id,
         });
     }
 
-    if gas_price.is_some() {
-        if max_fee_per_gas.is_some() {
+    if value.gas_price().is_some() {
+        if value.max_fee_per_gas().is_some() {
             return Err(ProviderError::InvalidTransactionInput(
                 "Cannot send both gasPrice and maxFeePerGas params".to_string(),
             ));
         }
 
-        if max_priority_fee_per_gas.is_some() {
+        if value.max_priority_fee_per_gas().is_some() {
             return Err(ProviderError::InvalidTransactionInput(
                 "Cannot send both gasPrice and maxPriorityFeePerGas".to_string(),
             ));
         }
 
-        if blobs.is_some() {
+        if value.blobs().is_some() {
             return Err(ProviderError::InvalidTransactionInput(
                 "Cannot send both gasPrice and blobs".to_string(),
             ));
         }
 
-        if blob_hashes.is_some() {
+        if value.blob_hashes().is_some() {
             return Err(ProviderError::InvalidTransactionInput(
                 "Cannot send both gasPrice and blobHashes".to_string(),
             ));
         }
 
-        if authorization_list.is_some() {
+        if value.authorization_list().is_some() {
             return Err(ProviderError::InvalidTransactionInput(
                 "Cannot send both gasPrice and authorizationList".to_string(),
             ));
         }
     }
 
-    if let Some(max_fee_per_gas) = max_fee_per_gas {
-        if let Some(max_priority_fee_per_gas) = max_priority_fee_per_gas {
-            if max_priority_fee_per_gas > max_fee_per_gas {
-                return Err(ProviderError::InvalidTransactionInput(format!(
-                    "maxPriorityFeePerGas ({max_priority_fee_per_gas}) is bigger than maxFeePerGas ({max_fee_per_gas})"),
-                ));
-            }
-        }
+    if let Some(max_fee_per_gas) = value.max_fee_per_gas()
+        && let Some(max_priority_fee_per_gas) = value.max_priority_fee_per_gas()
+        && max_priority_fee_per_gas > max_fee_per_gas
+    {
+        return Err(ProviderError::InvalidTransactionInput(format!(
+            "maxPriorityFeePerGas ({max_priority_fee_per_gas}) is bigger than maxFeePerGas ({max_fee_per_gas})"
+        )));
     }
 
-    if (blobs.is_some() || blob_hashes.is_some()) && to.is_none() {
+    if (value.blobs().is_some() || value.blob_hashes().is_some()) && value.to().is_none() {
         return Err(ProviderError::Eip4844TransactionMissingReceiver);
     }
 
-    if let Some(authorization_list) = authorization_list {
-        if to.is_none() {
+    if let Some(authorization_list) = value.authorization_list() {
+        if value.to().is_none() {
             return Err(ProviderError::Eip7702TransactionMissingReceiver);
         }
 
@@ -221,19 +273,20 @@ fn validate_transaction_spec<LoggerErrorT: Debug>(
     Ok(())
 }
 
-pub fn validate_call_request<LoggerErrorT: Debug>(
-    spec_id: SpecId,
-    call_request: &CallRequest,
+/// Validates a `L1CallRequest` and `BlockSpec` against the provided hardfork.
+pub fn validate_call_request<ChainSpecT: ProviderSpec<TimerT>, TimerT: Clone + TimeSinceEpoch>(
+    hardfork: ChainSpecT::Hardfork,
+    call_request: &L1CallRequest,
     block_spec: &BlockSpec,
-) -> Result<(), ProviderError<LoggerErrorT>> {
-    validate_post_merge_block_tags(spec_id, block_spec)?;
+) -> Result<(), ProviderErrorForChainSpec<ChainSpecT>> {
+    validate_post_merge_block_tags::<ChainSpecT, TimerT>(hardfork, block_spec)?;
 
     if call_request.blobs.is_some() | call_request.blob_hashes.is_some() {
         return Err(ProviderError::Eip4844CallRequestUnsupported);
     }
 
-    validate_transaction_and_call_request(
-        spec_id,
+    validate_transaction_and_call_request::<ChainSpecT, TimerT>(
+        hardfork,
         call_request
     ).map_err(|err| match err {
         ProviderError::UnsupportedEIP1559Parameters {
@@ -247,39 +300,47 @@ You can use them by running Hardhat Network with 'hardfork' {minimum_hardfork:?}
     })
 }
 
-pub fn validate_transaction_and_call_request<'a, LoggerErrorT: Debug>(
-    spec_id: SpecId,
-    validation_data: impl Into<SpecValidationData<'a>>,
-) -> Result<(), ProviderError<LoggerErrorT>> {
-    validate_transaction_spec(spec_id, validation_data.into()).map_err(|err| match err {
-        ProviderError::UnsupportedAccessListParameter {
-            minimum_hardfork, ..
-        } => ProviderError::InvalidArgument(format!(
-            "\
+pub(crate) fn validate_transaction_and_call_request<
+    ChainSpecT: ProviderSpec<TimerT>,
+    TimerT: Clone + TimeSinceEpoch,
+>(
+    hardfork: ChainSpecT::Hardfork,
+    validation_data: &impl HardforkValidationData,
+) -> Result<(), ProviderErrorForChainSpec<ChainSpecT>> {
+    validate_transaction_spec::<ChainSpecT, TimerT>(hardfork.into(), validation_data).map_err(
+        |err| match err {
+            ProviderError::UnsupportedAccessListParameter {
+                minimum_hardfork, ..
+            } => ProviderError::InvalidArgument(format!(
+                "\
 Access list received but is not supported by the current hardfork. 
 
 You can use them by running Hardhat Network with 'hardfork' {minimum_hardfork:?} or later.
         "
-        )),
-        err => err,
-    })
+            )),
+            err => err,
+        },
+    )
 }
 
-pub fn validate_eip3860_max_initcode_size<LoggerErrorT: Debug>(
-    spec_id: SpecId,
+pub(crate) fn validate_eip3860_max_initcode_size<
+    ChainSpecT: ProviderSpec<TimerT>,
+    TimerT: Clone + TimeSinceEpoch,
+>(
+    spec_id: EvmSpecId,
     allow_unlimited_contract_code_size: bool,
     to: Option<&Address>,
     data: &Bytes,
-) -> Result<(), ProviderError<LoggerErrorT>> {
-    if spec_id < SpecId::SHANGHAI || to.is_some() || allow_unlimited_contract_code_size {
+) -> Result<(), ProviderErrorForChainSpec<ChainSpecT>> {
+    if spec_id < EvmSpecId::SHANGHAI || to.is_some() || allow_unlimited_contract_code_size {
         return Ok(());
     }
 
-    if data.len() > edr_evm::MAX_INITCODE_SIZE {
+    if data.len() > MAX_INITCODE_SIZE {
         return Err(ProviderError::InvalidArgument(format!("
 Trying to send a deployment transaction whose init code length is {}. The max length allowed by EIP-3860 is {}.
 
-Enable the 'allowUnlimitedContractSize' option to allow init codes of any length.", data.len(), edr_evm::MAX_INITCODE_SIZE)));
+Enable the 'allowUnlimitedContractSize' option to allow init codes of any length.", data.len(), MAX_INITCODE_SIZE)));
     }
 
     Ok(())
@@ -316,13 +377,17 @@ impl<'a> From<ValidationBlockSpec<'a>> for BlockSpec {
     }
 }
 
-pub fn validate_post_merge_block_tags<'a, LoggerErrorT: Debug>(
-    hardfork: SpecId,
+pub(crate) fn validate_post_merge_block_tags<
+    'a,
+    ChainSpecT: ProviderSpec<TimerT>,
+    TimerT: Clone + TimeSinceEpoch,
+>(
+    hardfork: ChainSpecT::Hardfork,
     block_spec: impl Into<ValidationBlockSpec<'a>>,
-) -> Result<(), ProviderError<LoggerErrorT>> {
+) -> Result<(), ProviderErrorForChainSpec<ChainSpecT>> {
     let block_spec: ValidationBlockSpec<'a> = block_spec.into();
 
-    if hardfork < SpecId::MERGE {
+    if hardfork.into() < EvmSpecId::MERGE {
         match block_spec {
             ValidationBlockSpec::PreEip1898(PreEip1898BlockSpec::Tag(
                 tag @ (BlockTag::Safe | BlockTag::Finalized),
@@ -332,7 +397,7 @@ pub fn validate_post_merge_block_tags<'a, LoggerErrorT: Debug>(
             )) => {
                 return Err(ProviderError::InvalidBlockTag {
                     block_tag: *tag,
-                    spec: hardfork,
+                    hardfork,
                 });
             }
             _ => (),
@@ -343,126 +408,136 @@ pub fn validate_post_merge_block_tags<'a, LoggerErrorT: Debug>(
 
 #[cfg(test)]
 mod tests {
+    use edr_chain_l1::L1ChainSpec;
+    use edr_primitives::U256;
+
     use super::*;
+    use crate::time::CurrentTime;
 
-    fn assert_mixed_eip_1559_parameters(spec: SpecId) {
-        let mixed_request = EthTransactionRequest {
+    fn assert_mixed_eip_1559_parameters(spec: edr_chain_l1::Hardfork) {
+        let mixed_request = TransactionRequest {
             from: Address::ZERO,
-            gas_price: Some(U256::ZERO),
-            max_fee_per_gas: Some(U256::ZERO),
-            ..EthTransactionRequest::default()
+            gas_price: Some(0),
+            max_fee_per_gas: Some(0),
+            ..TransactionRequest::default()
         };
 
         assert!(matches!(
-            validate_transaction_spec::<()>(spec, (&mixed_request).into()),
+            validate_transaction_spec::<L1ChainSpec, CurrentTime>(spec, &mixed_request),
             Err(ProviderError::InvalidTransactionInput(_))
         ));
 
-        let mixed_request = EthTransactionRequest {
+        let mixed_request = TransactionRequest {
             from: Address::ZERO,
-            gas_price: Some(U256::ZERO),
-            max_priority_fee_per_gas: Some(U256::ZERO),
-            ..EthTransactionRequest::default()
+            gas_price: Some(0),
+            max_priority_fee_per_gas: Some(0),
+            ..TransactionRequest::default()
         };
 
         assert!(matches!(
-            validate_transaction_spec::<()>(spec, (&mixed_request).into()),
+            validate_transaction_spec::<L1ChainSpec, CurrentTime>(spec, &mixed_request),
             Err(ProviderError::InvalidTransactionInput(_))
         ));
 
-        let request_with_too_low_max_fee = EthTransactionRequest {
+        let request_with_too_low_max_fee = TransactionRequest {
             from: Address::ZERO,
-            max_fee_per_gas: Some(U256::ZERO),
-            max_priority_fee_per_gas: Some(U256::from(1u64)),
-            ..EthTransactionRequest::default()
+            max_fee_per_gas: Some(0),
+            max_priority_fee_per_gas: Some(1),
+            ..TransactionRequest::default()
         };
 
         assert!(matches!(
-            validate_transaction_spec::<()>(spec, (&request_with_too_low_max_fee).into()),
+            validate_transaction_spec::<L1ChainSpec, CurrentTime>(
+                spec,
+                &request_with_too_low_max_fee
+            ),
             Err(ProviderError::InvalidTransactionInput(_))
         ));
     }
 
-    fn assert_unsupported_eip_1559_parameters(spec: SpecId) {
-        let eip_1559_request = EthTransactionRequest {
+    fn assert_unsupported_eip_1559_parameters(spec: edr_chain_l1::Hardfork) {
+        let eip_1559_request = TransactionRequest {
             from: Address::ZERO,
-            max_fee_per_gas: Some(U256::ZERO),
-            ..EthTransactionRequest::default()
+            max_fee_per_gas: Some(0),
+            ..TransactionRequest::default()
         };
 
         assert!(matches!(
-            validate_transaction_spec::<()>(spec, (&eip_1559_request).into()),
+            validate_transaction_spec::<L1ChainSpec, CurrentTime>(spec, &eip_1559_request),
             Err(ProviderError::UnsupportedEIP1559Parameters { .. })
         ));
 
-        let eip_1559_request = EthTransactionRequest {
+        let eip_1559_request = TransactionRequest {
             from: Address::ZERO,
-            max_priority_fee_per_gas: Some(U256::ZERO),
-            ..EthTransactionRequest::default()
+            max_priority_fee_per_gas: Some(0),
+            ..TransactionRequest::default()
         };
 
         assert!(matches!(
-            validate_transaction_spec::<()>(spec, (&eip_1559_request).into()),
+            validate_transaction_spec::<L1ChainSpec, CurrentTime>(spec, &eip_1559_request),
             Err(ProviderError::UnsupportedEIP1559Parameters { .. })
         ));
     }
 
-    fn assert_unsupported_eip_4844_parameters(spec: SpecId) {
-        let eip_4844_request = EthTransactionRequest {
+    fn assert_unsupported_eip_4844_parameters(spec: edr_chain_l1::Hardfork) {
+        let eip_4844_request = TransactionRequest {
             from: Address::ZERO,
             blobs: Some(Vec::new()),
-            ..EthTransactionRequest::default()
+            ..TransactionRequest::default()
         };
 
         assert!(matches!(
-            validate_transaction_spec::<()>(spec, (&eip_4844_request).into()),
+            validate_transaction_spec::<L1ChainSpec, CurrentTime>(spec, &eip_4844_request),
             Err(ProviderError::UnsupportedEIP4844Parameters { .. })
         ));
 
-        let eip_4844_request = EthTransactionRequest {
+        let eip_4844_request = TransactionRequest {
             from: Address::ZERO,
             blob_hashes: Some(Vec::new()),
-            ..EthTransactionRequest::default()
+            ..TransactionRequest::default()
         };
 
         assert!(matches!(
-            validate_transaction_spec::<()>(spec, (&eip_4844_request).into()),
+            validate_transaction_spec::<L1ChainSpec, CurrentTime>(spec, &eip_4844_request),
             Err(ProviderError::UnsupportedEIP4844Parameters { .. })
         ));
     }
 
-    fn assert_unsuporrted_eip_7702_parameters(spec: SpecId) {
-        let eip_7702_request = EthTransactionRequest {
+    fn assert_unsuporrted_eip_7702_parameters(spec: edr_chain_l1::Hardfork) {
+        let eip_7702_request = TransactionRequest {
             from: Address::ZERO,
             authorization_list: Some(Vec::new()),
-            ..EthTransactionRequest::default()
+            ..TransactionRequest::default()
         };
 
         assert!(matches!(
-            validate_transaction_spec::<()>(spec, (&eip_7702_request).into()),
+            validate_transaction_spec::<L1ChainSpec, CurrentTime>(spec, &eip_7702_request),
             Err(ProviderError::UnsupportedEip7702Parameters { .. })
         ));
     }
 
     #[test]
     fn validate_transaction_spec_eip_155_invalid_inputs() {
-        let eip155_spec = SpecId::MUIR_GLACIER;
-        let valid_request = EthTransactionRequest {
+        let eip155_spec = edr_chain_l1::Hardfork::MUIR_GLACIER;
+        let valid_request = TransactionRequest {
             from: Address::ZERO,
-            gas_price: Some(U256::ZERO),
-            ..EthTransactionRequest::default()
+            gas_price: Some(0),
+            ..TransactionRequest::default()
         };
 
-        assert!(validate_transaction_spec::<()>(eip155_spec, (&valid_request).into()).is_ok());
+        assert!(
+            validate_transaction_spec::<L1ChainSpec, CurrentTime>(eip155_spec, &valid_request)
+                .is_ok()
+        );
 
-        let eip_2930_request = EthTransactionRequest {
+        let eip_2930_request = TransactionRequest {
             from: Address::ZERO,
             access_list: Some(Vec::new()),
-            ..EthTransactionRequest::default()
+            ..TransactionRequest::default()
         };
 
         assert!(matches!(
-            validate_transaction_spec::<()>(eip155_spec, (&eip_2930_request).into()),
+            validate_transaction_spec::<L1ChainSpec, CurrentTime>(eip155_spec, &eip_2930_request),
             Err(ProviderError::UnsupportedAccessListParameter { .. })
         ));
 
@@ -473,15 +548,19 @@ mod tests {
 
     #[test]
     fn validate_transaction_spec_eip_2930_invalid_inputs() {
-        let eip2930_spec = SpecId::BERLIN;
-        let valid_request = EthTransactionRequest {
+        let eip2930_spec = edr_chain_l1::Hardfork::BERLIN;
+        let valid_request = TransactionRequest {
             from: Address::ZERO,
-            gas_price: Some(U256::ZERO),
+            gas_price: Some(0),
             access_list: Some(Vec::new()),
-            ..EthTransactionRequest::default()
+            ..TransactionRequest::default()
         };
 
-        assert!(validate_transaction_spec::<()>(eip2930_spec, (&valid_request).into()).is_ok());
+        assert!(validate_transaction_spec::<L1ChainSpec, CurrentTime>(
+            eip2930_spec,
+            &valid_request
+        )
+        .is_ok());
 
         assert_unsupported_eip_1559_parameters(eip2930_spec);
         assert_unsupported_eip_4844_parameters(eip2930_spec);
@@ -490,16 +569,20 @@ mod tests {
 
     #[test]
     fn validate_transaction_spec_eip_1559_invalid_inputs() {
-        let eip1559_spec = SpecId::LONDON;
-        let valid_request = EthTransactionRequest {
+        let eip1559_spec = edr_chain_l1::Hardfork::LONDON;
+        let valid_request = TransactionRequest {
             from: Address::ZERO,
-            max_fee_per_gas: Some(U256::ZERO),
-            max_priority_fee_per_gas: Some(U256::ZERO),
+            max_fee_per_gas: Some(0),
+            max_priority_fee_per_gas: Some(0),
             access_list: Some(Vec::new()),
-            ..EthTransactionRequest::default()
+            ..TransactionRequest::default()
         };
 
-        assert!(validate_transaction_spec::<()>(eip1559_spec, (&valid_request).into()).is_ok());
+        assert!(validate_transaction_spec::<L1ChainSpec, CurrentTime>(
+            eip1559_spec,
+            &valid_request
+        )
+        .is_ok());
 
         assert_unsupported_eip_4844_parameters(eip1559_spec);
         assert_unsuporrted_eip_7702_parameters(eip1559_spec);
@@ -508,64 +591,74 @@ mod tests {
 
     #[test]
     fn validate_transaction_spec_eip_4844_invalid_inputs() {
-        let eip4844_spec = SpecId::CANCUN;
-        let valid_request = EthTransactionRequest {
+        let eip4844_spec = edr_chain_l1::Hardfork::CANCUN;
+        let valid_request = TransactionRequest {
             from: Address::ZERO,
             to: Some(Address::ZERO),
-            max_fee_per_gas: Some(U256::ZERO),
-            max_priority_fee_per_gas: Some(U256::ZERO),
+            max_fee_per_gas: Some(0),
+            max_priority_fee_per_gas: Some(0),
             access_list: Some(Vec::new()),
             blobs: Some(Vec::new()),
             blob_hashes: Some(Vec::new()),
-            ..EthTransactionRequest::default()
+            ..TransactionRequest::default()
         };
 
-        assert!(validate_transaction_spec::<()>(eip4844_spec, (&valid_request).into()).is_ok());
+        assert!(validate_transaction_spec::<L1ChainSpec, CurrentTime>(
+            eip4844_spec,
+            &valid_request
+        )
+        .is_ok());
         assert_mixed_eip_1559_parameters(eip4844_spec);
 
-        let mixed_request = EthTransactionRequest {
+        let mixed_request = TransactionRequest {
             from: Address::ZERO,
-            gas_price: Some(U256::ZERO),
+            gas_price: Some(0),
             blobs: Some(Vec::new()),
-            ..EthTransactionRequest::default()
+            ..TransactionRequest::default()
         };
 
         assert!(matches!(
-            validate_transaction_spec::<()>(eip4844_spec, (&mixed_request).into()),
+            validate_transaction_spec::<L1ChainSpec, CurrentTime>(eip4844_spec, &mixed_request),
             Err(ProviderError::InvalidTransactionInput(_))
         ));
 
-        let mixed_request = EthTransactionRequest {
+        let mixed_request = TransactionRequest {
             from: Address::ZERO,
-            gas_price: Some(U256::ZERO),
+            gas_price: Some(0),
             blob_hashes: Some(Vec::new()),
-            ..EthTransactionRequest::default()
+            ..TransactionRequest::default()
         };
 
         assert!(matches!(
-            validate_transaction_spec::<()>(eip4844_spec, (&mixed_request).into()),
+            validate_transaction_spec::<L1ChainSpec, CurrentTime>(eip4844_spec, &mixed_request),
             Err(ProviderError::InvalidTransactionInput(_))
         ));
 
-        let missing_receiver_request = EthTransactionRequest {
+        let missing_receiver_request = TransactionRequest {
             from: Address::ZERO,
             blobs: Some(Vec::new()),
-            ..EthTransactionRequest::default()
+            ..TransactionRequest::default()
         };
 
         assert!(matches!(
-            validate_transaction_spec::<()>(eip4844_spec, (&missing_receiver_request).into()),
+            validate_transaction_spec::<L1ChainSpec, CurrentTime>(
+                eip4844_spec,
+                &missing_receiver_request
+            ),
             Err(ProviderError::Eip4844TransactionMissingReceiver)
         ));
 
-        let missing_receiver_request = EthTransactionRequest {
+        let missing_receiver_request = TransactionRequest {
             from: Address::ZERO,
             blob_hashes: Some(Vec::new()),
-            ..EthTransactionRequest::default()
+            ..TransactionRequest::default()
         };
 
         assert!(matches!(
-            validate_transaction_spec::<()>(eip4844_spec, (&missing_receiver_request).into()),
+            validate_transaction_spec::<L1ChainSpec, CurrentTime>(
+                eip4844_spec,
+                &missing_receiver_request
+            ),
             Err(ProviderError::Eip4844TransactionMissingReceiver)
         ));
 
@@ -574,15 +667,15 @@ mod tests {
 
     #[test]
     fn validate_transaction_spec_eip_7702_invalid_inputs() {
-        let eip7702_spec = SpecId::PRAGUE;
-        let valid_request = EthTransactionRequest {
+        let eip7702_spec = edr_chain_l1::Hardfork::PRAGUE;
+        let valid_request = TransactionRequest {
             from: Address::ZERO,
             to: Some(Address::ZERO),
-            max_fee_per_gas: Some(U256::ZERO),
-            max_priority_fee_per_gas: Some(U256::ZERO),
+            max_fee_per_gas: Some(0),
+            max_priority_fee_per_gas: Some(0),
             access_list: Some(Vec::new()),
-            authorization_list: Some(vec![eip7702::SignedAuthorization::new_unchecked(
-                eip7702::Authorization {
+            authorization_list: Some(vec![edr_eip7702::SignedAuthorization::new_unchecked(
+                edr_eip7702::Authorization {
                     chain_id: U256::ZERO,
                     address: Address::ZERO,
                     nonce: 1,
@@ -591,46 +684,53 @@ mod tests {
                 U256::ZERO,
                 U256::ZERO,
             )]),
-            ..EthTransactionRequest::default()
+            ..TransactionRequest::default()
         };
 
-        assert!(validate_transaction_spec::<()>(eip7702_spec, (&valid_request).into()).is_ok());
+        assert!(validate_transaction_spec::<L1ChainSpec, CurrentTime>(
+            eip7702_spec,
+            &valid_request
+        )
+        .is_ok());
         assert_mixed_eip_1559_parameters(eip7702_spec);
 
-        let mixed_request = EthTransactionRequest {
+        let mixed_request = TransactionRequest {
             from: Address::ZERO,
-            gas_price: Some(U256::ZERO),
+            gas_price: Some(0),
             authorization_list: Some(Vec::new()),
-            ..EthTransactionRequest::default()
+            ..TransactionRequest::default()
         };
 
         assert!(matches!(
-            validate_transaction_spec::<()>(eip7702_spec, (&mixed_request).into()),
+            validate_transaction_spec::<L1ChainSpec, CurrentTime>(eip7702_spec, &mixed_request),
             Err(ProviderError::InvalidTransactionInput(_))
         ));
 
-        let missing_receiver_request = EthTransactionRequest {
+        let missing_receiver_request = TransactionRequest {
             from: Address::ZERO,
             authorization_list: Some(Vec::new()),
-            ..EthTransactionRequest::default()
+            ..TransactionRequest::default()
         };
 
         assert!(matches!(
-            validate_transaction_spec::<()>(eip7702_spec, (&missing_receiver_request).into()),
+            validate_transaction_spec::<L1ChainSpec, CurrentTime>(
+                eip7702_spec,
+                &missing_receiver_request
+            ),
             Err(ProviderError::Eip7702TransactionMissingReceiver)
         ));
 
-        let empty_authorization_list_request = EthTransactionRequest {
+        let empty_authorization_list_request = TransactionRequest {
             from: Address::ZERO,
             to: Some(Address::ZERO),
             authorization_list: Some(Vec::new()),
-            ..EthTransactionRequest::default()
+            ..TransactionRequest::default()
         };
 
         assert!(matches!(
-            validate_transaction_spec::<()>(
+            validate_transaction_spec::<L1ChainSpec, CurrentTime>(
                 eip7702_spec,
-                (&empty_authorization_list_request).into()
+                &empty_authorization_list_request
             ),
             Err(ProviderError::Eip7702TransactionWithoutAuthorizations)
         ));

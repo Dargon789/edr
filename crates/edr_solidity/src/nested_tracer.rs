@@ -2,12 +2,10 @@
 
 use std::{cell::RefCell, rc::Rc};
 
-use edr_eth::{Address, Bytes, U256};
-use edr_evm::{
-    alloy_primitives::U160,
-    trace::{BeforeMessage, Step},
-    ExecutionResult,
-};
+use edr_chain_spec::HaltReasonTrait;
+use edr_chain_spec_evm::result::ExecutionResult;
+use edr_primitives::{Address, Bytes, U160, U256};
+use edr_tracing::{BeforeMessage, Step};
 
 use crate::{
     exit_code::ExitCode,
@@ -19,6 +17,9 @@ use crate::{
 /// Errors that can occur during the generation of the nested trace.
 #[derive(Debug, thiserror::Error)]
 pub enum NestedTracerError {
+    /// Invalid precompile address
+    #[error("Invalid precompile address: {0}")]
+    InvalidPrecompileAddress(U160),
     /// Invalid input: The created address should be defined in the successful
     #[error("Created address should be defined in successful create trace")]
     MissingAddressInExecutionResult,
@@ -38,9 +39,9 @@ pub enum NestedTracerError {
 }
 
 /// Observes a trace, collecting information about the execution of the EVM.
-pub fn convert_trace_messages_to_nested_trace(
-    trace: edr_evm::trace::Trace,
-) -> Result<Option<NestedTrace>, NestedTracerError> {
+pub fn convert_trace_messages_to_nested_trace<HaltReasonT: HaltReasonTrait>(
+    trace: edr_tracing::Trace<HaltReasonT>,
+) -> Result<Option<NestedTrace<HaltReasonT>>, NestedTracerError> {
     let mut tracer = NestedTracer::new();
 
     tracer.add_messages(trace.messages)?;
@@ -49,12 +50,12 @@ pub fn convert_trace_messages_to_nested_trace(
 }
 
 /// Naive Rust port of the `VmTracer` from Hardhat.
-struct NestedTracer {
+struct NestedTracer<HaltReasonT: HaltReasonTrait> {
     tracing_steps: Vec<Step>,
-    message_traces: Vec<Rc<RefCell<InternalNestedTrace>>>,
+    message_traces: Vec<Rc<RefCell<InternalNestedTrace<HaltReasonT>>>>,
 }
 
-impl Default for NestedTracer {
+impl<HaltReasonT: HaltReasonTrait> Default for NestedTracer<HaltReasonT> {
     fn default() -> Self {
         Self::new()
     }
@@ -66,7 +67,7 @@ impl Default for NestedTracer {
 // precompiles, which start at 0x100).
 const MAX_PRECOMPILE_NUMBER: u16 = 10;
 
-impl NestedTracer {
+impl<HaltReasonT: HaltReasonTrait> NestedTracer<HaltReasonT> {
     /// Creates a new [`NestedTracer`].
     const fn new() -> Self {
         NestedTracer {
@@ -76,23 +77,23 @@ impl NestedTracer {
     }
 
     /// Returns a reference to the last top-level message trace.
-    fn get_last_top_level_message_trace(mut self) -> Option<NestedTrace> {
+    fn get_last_top_level_message_trace(mut self) -> Option<NestedTrace<HaltReasonT>> {
         self.message_traces.pop().map(convert_to_external_trace)
     }
 
     fn add_messages(
         &mut self,
-        messages: Vec<edr_evm::trace::TraceMessage>,
+        messages: Vec<edr_tracing::TraceMessage<HaltReasonT>>,
     ) -> Result<(), NestedTracerError> {
         for msg in messages {
             match msg {
-                edr_evm::trace::TraceMessage::Before(before) => {
+                edr_tracing::TraceMessage::Before(before) => {
                     self.add_before_message(before)?;
                 }
-                edr_evm::trace::TraceMessage::Step(step) => {
+                edr_tracing::TraceMessage::Step(step) => {
                     self.add_step(step)?;
                 }
-                edr_evm::trace::TraceMessage::After(after) => {
+                edr_tracing::TraceMessage::After(after) => {
                     self.add_after_message(after.execution_result)?;
                 }
             }
@@ -101,7 +102,7 @@ impl NestedTracer {
     }
 
     fn add_before_message(&mut self, message: BeforeMessage) -> Result<(), NestedTracerError> {
-        let trace: InternalNestedTrace;
+        let trace: InternalNestedTrace<HaltReasonT>;
 
         if message.depth == 0 {
             self.message_traces.clear();
@@ -114,7 +115,7 @@ impl NestedTracer {
             if to_as_u160 <= U160::from(MAX_PRECOMPILE_NUMBER) {
                 let precompile: u32 = to_as_u160
                     .try_into()
-                    .expect("MAX_PRECOMPILE_NUMBER is of type u16 so it fits");
+                    .map_err(|_err| NestedTracerError::InvalidPrecompileAddress(to_as_u160))?;
 
                 let precompile_trace = PrecompileMessage {
                     value: message.value,
@@ -215,7 +216,10 @@ impl NestedTracer {
         Ok(())
     }
 
-    fn add_after_message(&mut self, result: ExecutionResult) -> Result<(), NestedTracerError> {
+    fn add_after_message(
+        &mut self,
+        result: ExecutionResult<HaltReasonT>,
+    ) -> Result<(), NestedTracerError> {
         if let Some(trace) = self.message_traces.last_mut() {
             let mut trace = trace.borrow_mut();
 
@@ -256,13 +260,13 @@ impl NestedTracer {
 /// A nested trace where the message steps are shared and mutable via a
 /// refcell.
 #[derive(Clone, Debug)]
-enum InternalNestedTrace {
-    Create(InternalCreateMessage),
-    Call(InternalCallMessage),
-    Precompile(PrecompileMessage),
+enum InternalNestedTrace<HaltReasonT: HaltReasonTrait> {
+    Create(InternalCreateMessage<HaltReasonT>),
+    Call(InternalCallMessage<HaltReasonT>),
+    Precompile(PrecompileMessage<HaltReasonT>),
 }
 
-impl InternalNestedTrace {
+impl<HaltReasonT: HaltReasonTrait> InternalNestedTrace<HaltReasonT> {
     fn set_gas_used(&mut self, gas_used: u64) {
         match self {
             InternalNestedTrace::Create(create) => create.gas_used = gas_used,
@@ -272,7 +276,7 @@ impl InternalNestedTrace {
         }
     }
 
-    fn set_exit_code(&mut self, exit_code: ExitCode) {
+    fn set_exit_code(&mut self, exit_code: ExitCode<HaltReasonT>) {
         match self {
             InternalNestedTrace::Create(create) => create.exit = exit_code,
             InternalNestedTrace::Call(call) => call.exit = exit_code,
@@ -293,14 +297,14 @@ impl InternalNestedTrace {
 
 /// Represents a call message.
 #[derive(Clone, Debug)]
-struct InternalCallMessage {
+struct InternalCallMessage<HaltReasonT: HaltReasonTrait> {
     // The following is just an optimization: When processing this traces it's useful to know ahead
     // of time how many subtraces there are.
     /// Number of subtraces. Used to speed up the processing of the traces in
     /// JS.
     pub number_of_subtraces: u32,
     /// Children messages.
-    pub steps: Vec<InternalNestedTraceStep>,
+    pub steps: Vec<InternalNestedTraceStep<HaltReasonT>>,
     /// Calldata buffer
     pub calldata: Bytes,
     /// Address of the contract that is being executed.
@@ -314,7 +318,7 @@ struct InternalCallMessage {
     /// Return data buffer.
     pub return_data: Bytes,
     /// EVM exit code.
-    pub exit: ExitCode,
+    pub exit: ExitCode<HaltReasonT>,
     /// How much gas was used.
     pub gas_used: u64,
     /// Depth of the message.
@@ -323,14 +327,14 @@ struct InternalCallMessage {
 
 /// Represents a create message.
 #[derive(Clone, Debug)]
-struct InternalCreateMessage {
+struct InternalCreateMessage<HaltReasonT: HaltReasonTrait> {
     // The following is just an optimization: When processing this traces it's useful to know ahead
     // of time how many subtraces there are.
     /// Number of subtraces. Used to speed up the processing of the traces in
     /// JS.
     pub number_of_subtraces: u32,
     /// Children messages.
-    pub steps: Vec<InternalNestedTraceStep>,
+    pub steps: Vec<InternalNestedTraceStep<HaltReasonT>>,
     /// Address of the deployed contract.
     pub deployed_contract: Option<Bytes>,
     /// Code of the contract that is being executed.
@@ -340,7 +344,7 @@ struct InternalCreateMessage {
     /// Return data buffer.
     pub return_data: Bytes,
     /// EVM exit code.
-    pub exit: ExitCode,
+    pub exit: ExitCode<HaltReasonT>,
     /// How much gas was used.
     pub gas_used: u64,
     /// Depth of the message.
@@ -350,16 +354,16 @@ struct InternalCreateMessage {
 /// Represents a message step. Naive Rust port of the `MessageTraceStep`
 /// from Hardhat.
 #[derive(Clone, Debug)]
-enum InternalNestedTraceStep {
+enum InternalNestedTraceStep<HaltReasonT: HaltReasonTrait> {
     /// [`NestedTrace`] variant.
     // It's both read and written to (updated) by the `[NestedTracer]`.
-    Message(Rc<RefCell<InternalNestedTrace>>),
+    Message(Rc<RefCell<InternalNestedTrace<HaltReasonT>>>),
     /// [`EvmStep`] variant.
     Evm(EvmStep),
 }
 
-enum InternalNestedTraceStepWithoutRefCell {
-    Message(NestedTrace),
+enum InternalNestedTraceStepWithoutRefCell<HaltReasonT: HaltReasonTrait> {
+    Message(Box<NestedTrace<HaltReasonT>>),
     Evm(EvmStep),
 }
 
@@ -369,7 +373,9 @@ enum InternalNestedTraceStepWithoutRefCell {
 /// # Panics
 ///
 ///  Panics if the value is mutably borrowed.
-fn convert_to_external_trace(value: Rc<RefCell<InternalNestedTrace>>) -> NestedTrace {
+fn convert_to_external_trace<HaltReasonT: HaltReasonTrait>(
+    value: Rc<RefCell<InternalNestedTrace<HaltReasonT>>>,
+) -> NestedTrace<HaltReasonT> {
     // We can't use `Rc::try_unwrap` because it requires that the `Rc` is unique.
     let trace = value.borrow().clone();
 
@@ -435,10 +441,14 @@ fn convert_to_external_trace(value: Rc<RefCell<InternalNestedTrace>>) -> NestedT
 
 /// # Panics
 //  Panics if a nested value is mutably borrowed.
-fn convert_to_external_step(value: InternalNestedTraceStep) -> NestedTraceStep {
+fn convert_to_external_step<HaltReasonT: HaltReasonTrait>(
+    value: InternalNestedTraceStep<HaltReasonT>,
+) -> NestedTraceStep<HaltReasonT> {
     match value {
         InternalNestedTraceStep::Message(message) => {
-            InternalNestedTraceStepWithoutRefCell::Message(convert_to_external_trace(message))
+            InternalNestedTraceStepWithoutRefCell::Message(Box::new(convert_to_external_trace(
+                message,
+            )))
         }
         InternalNestedTraceStep::Evm(evm_step) => {
             InternalNestedTraceStepWithoutRefCell::Evm(evm_step)
@@ -448,10 +458,12 @@ fn convert_to_external_step(value: InternalNestedTraceStep) -> NestedTraceStep {
 }
 
 // This can be a `From` conversion, because it can't panic.
-impl From<InternalNestedTraceStepWithoutRefCell> for NestedTraceStep {
-    fn from(step: InternalNestedTraceStepWithoutRefCell) -> Self {
+impl<HaltReasonT: HaltReasonTrait> From<InternalNestedTraceStepWithoutRefCell<HaltReasonT>>
+    for NestedTraceStep<HaltReasonT>
+{
+    fn from(step: InternalNestedTraceStepWithoutRefCell<HaltReasonT>) -> Self {
         match step {
-            InternalNestedTraceStepWithoutRefCell::Message(trace) => match trace {
+            InternalNestedTraceStepWithoutRefCell::Message(trace) => match *trace {
                 NestedTrace::Create(create_trace) => NestedTraceStep::Create(create_trace),
                 NestedTrace::Call(call_trace) => NestedTraceStep::Call(call_trace),
                 NestedTrace::Precompile(precompile_trace) => {

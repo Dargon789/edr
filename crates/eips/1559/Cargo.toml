@@ -1,0 +1,14 @@
+[package]
+name = "edr_eip1559"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+alloy-eips = { workspace = true , features = ["serde"]}
+serde.workspace = true
+
+[dev-dependencies]
+edr_chain_l1.workspace = true
+
+[lints]
+workspace = true

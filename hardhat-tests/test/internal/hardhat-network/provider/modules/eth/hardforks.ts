@@ -39,6 +39,7 @@ import {
   EXAMPLE_DIFFICULTY_CONTRACT,
   EXAMPLE_READ_CONTRACT,
 } from "../../../helpers/contracts";
+import { makeCommon } from "../../../helpers/makeCommon";
 
 describe("Eth module - hardfork dependant tests", function () {
   function useProviderAndCommon(
@@ -47,17 +48,12 @@ describe("Eth module - hardfork dependant tests", function () {
   ) {
     importedUseProvider({ hardfork, allowUnlimitedContractSize });
     beforeEach(async function () {
-      // TODO: Find out a better way to obtain the common here
-      const provider: any = this.hardhatNetworkProvider;
-
-      // eslint-disable-next-line dot-notation,@typescript-eslint/dot-notation
-      this.common = provider["_common"];
+      this.common = await makeCommon(this.provider);
     });
   }
 
-  const privateKey = Buffer.from(
-    DEFAULT_ACCOUNTS[1].privateKey.slice(2),
-    "hex"
+  const privateKey = new Uint8Array(
+    Buffer.from(DEFAULT_ACCOUNTS[1].privateKey.slice(2), "hex")
   );
 
   function getSampleSignedTx(common: Common) {
@@ -1119,7 +1115,7 @@ describe("Eth module - hardfork dependant tests", function () {
         await assertInvalidInputError(
           this.provider,
           "eth_feeHistory",
-          ["0x1", "latest"],
+          ["0x1", "latest", []],
           "eth_feeHistory is disabled. It only works with the London hardfork or a later one."
         );
       });
@@ -1130,7 +1126,7 @@ describe("Eth module - hardfork dependant tests", function () {
         useProviderAndCommon(hardfork);
 
         it(`Should be enabled when ${hardfork} is activated`, async function () {
-          await this.provider.send("eth_feeHistory", ["0x1", "latest"]);
+          await this.provider.send("eth_feeHistory", ["0x1", "latest", []]);
         });
       }
     });

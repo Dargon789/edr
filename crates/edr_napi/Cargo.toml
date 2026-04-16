@@ -1,36 +1,89 @@
 [package]
 name = "edr_napi"
-version = "0.3.5"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-alloy-sol-types = { version = "0.5.1", default-features = false, features = ["std"] }
-ansi_term = { version = "0.12.1", default-features = false }
-itertools = { version = "0.12.0", default-features = false }
-k256 = { version = "0.13.1", default-features = false, features = ["arithmetic", "ecdsa", "pkcs8", "precomputed-tables", "std"] }
+alloy-dyn-abi.workspace = true
+alloy-json-abi.workspace = true
+alloy-sol-types.workspace = true
+derive_more.workspace = true
+derive-where.workspace = true
+edr_artifact.workspace = true
+edr_block_header.workspace = true
+edr_block_miner.workspace = true
+edr_blockchain_fork.workspace = true
+edr_chain_config.workspace = true
+edr_chain_l1.workspace = true
+edr_chain_spec.workspace = true
+edr_chain_spec_block.workspace = true
+edr_chain_spec_evm.workspace = true
+edr_chain_spec_rpc.workspace = true
+edr_common.workspace = true
+edr_coverage.workspace = true
+edr_decoder_revert.workspace = true
+edr_defaults.workspace = true
+edr_eip1559.workspace = true
+edr_gas_report.workspace = true
+edr_generic.workspace = true
+edr_instrument.workspace = true
+edr_napi_core.workspace = true
+edr_op = { workspace = true, optional = true }
+edr_precompile.workspace = true
+edr_primitives.workspace = true
+edr_provider.workspace = true
+edr_receipt.workspace = true
+edr_rpc_client.workspace = true
+edr_scenarios = { workspace = true, optional = true }
+edr_solidity_tests.workspace = true
+edr_state_api.workspace = true
+edr_signer.workspace = true
+edr_solidity.workspace = true
+edr_tracing.workspace = true
+k256 = { version = "0.13.1", default-features = false, features = [
+    "arithmetic",
+    "ecdsa",
+    "pkcs8",
+] }
+mimalloc = { version = "0.1.39", default-features = false, features = [
+    "local_dynamic_tls",
+] }
 # The `async` feature ensures that a tokio runtime is available
-napi = { version = "2.16.11", default-features = false, features = ["async", "error_anyhow", "napi8", "serde-json"] }
-napi-derive = "2.16.11"
-edr_defaults = { version = "0.3.5", path = "../edr_defaults" }
-edr_evm = { version = "0.3.5", path = "../edr_evm", features = ["tracing"] }
-edr_eth = { version = "0.3.5", path = "../edr_eth" }
-edr_provider = { version = "0.3.5", path = "../edr_provider" }
-edr_rpc_eth = { version = "0.3.5", path = "../edr_rpc_eth" }
-edr_solidity = { version = "0.3.5", path = "../edr_solidity" }
-edr_scenarios = { version = "0.3.5", path = "../edr_scenarios", optional = true }
-serde_json = { version = "1.0.85", default-features = false, features = ["alloc"] }
-thiserror = { version = "1.0.37", default-features = false }
-tracing = { version = "0.1.37", default-features = false, features = ["std"] }
-tracing-flame = { version = "0.2.0", default-features = false, features = ["smallvec"] }
-tracing-subscriber = { version = "0.3.18", default-features = false, features = ["ansi", "env-filter", "fmt", "parking_lot", "smallvec", "std"] }
+napi = { version = "2.16.17", default-features = false, features = [
+    "async",
+    "error_anyhow",
+    "napi8",
+    "serde-json",
+] }
+napi-derive = "2.16.13"
+parking_lot.workspace = true
 rand = { version = "0.8.4", optional = true }
-serde = { version = "1.0.189", features = ["derive"] }
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 static_assertions = "1.1.0"
 strum = { version = "0.26.0", features = ["derive"] }
-mimalloc = { version = "0.1.39", default-features = false, features = ["local_dynamic_tls"] }
+thiserror = { version = "2.0.12", default-features = false }
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+tracing-flame = { version = "0.2.0", default-features = false, features = [
+    "smallvec",
+] }
+tracing-subscriber = { version = "0.3.18", default-features = false, features = [
+    "ansi",
+    "env-filter",
+    "fmt",
+    "parking_lot",
+    "smallvec",
+    "std",
+] }
+
+# Solidity tests
+foundry-cheatcodes.workspace = true
+foundry-compilers.workspace = true
+tempfile = "3.10.1"
 
 [target.x86_64-unknown-linux-gnu.dependencies]
 openssl-sys = { version = "0.9.93", features = ["vendored"] }
@@ -48,11 +101,24 @@ openssl-sys = { version = "0.9.93", features = ["vendored"] }
 napi-build = "2.0.1"
 
 [features]
-tracing = ["edr_evm/tracing", "edr_provider/tracing"]
-scenarios = ["rand", "edr_scenarios"]
-
-[profile.release]
-lto = true
+op = ["dep:edr_op"]
+scenarios = ["dep:edr_scenarios", "dep:rand"]
+test-mock = ["edr_provider/test-utils"]
+tracing = [
+    "edr_block_miner/tracing",
+    "edr_blockchain_fork/tracing",
+    "edr_chain_l1/tracing",
+    "edr_chain_spec_block/tracing",
+    "edr_chain_spec_evm/tracing",
+    "edr_gas_report/tracing",
+    "edr_generic/tracing",
+    "edr_napi_core/tracing",
+    "edr_op/tracing",
+    "edr_provider/tracing",
+    "edr_rpc_client/tracing",
+    "edr_solidity/tracing",
+    "edr_solidity_tests/tracing",
+]
 
 [lints]
 workspace = true

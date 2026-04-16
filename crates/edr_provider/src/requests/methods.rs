@@ -1,15 +1,17 @@
 use alloy_dyn_abi::eip712::TypedData;
+use alloy_rpc_types_trace::geth::GethDebugTracingOptions;
+use derive_where::derive_where;
+use edr_chain_spec_rpc::RpcChainSpec;
 use edr_eth::{
     filter::{LogFilterOptions, SubscriptionType},
     serde::{optional_single_to_sequence, sequence_to_optional_single},
-    transaction::EthTransactionRequest,
-    Address, BlockSpec, Bytes, PreEip1898BlockSpec, B256, U256, U64,
+    BlockSpec, PreEip1898BlockSpec,
 };
-use edr_rpc_eth::{CallRequest, StateOverrideOptions};
-use edr_solidity::artifacts::{CompilerInput, CompilerOutput};
+use edr_primitives::{Address, Bytes, StorageKey, B256, U128, U256, U64};
+use edr_rpc_eth::StateOverrideOptions;
+use serde::{Deserialize, Serialize};
 
 use super::serde::{RpcAddress, Timestamp};
-use crate::requests::{debug::DebugTraceConfig, hardhat::rpc_types::ResetProviderConfig};
 
 mod optional_block_spec {
     use super::BlockSpec;
@@ -24,9 +26,10 @@ mod optional_block_spec {
 }
 
 /// for an invoking a method on a remote ethereum node
-#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
-#[serde(tag = "method", content = "params")]
-pub enum MethodInvocation {
+#[derive(Deserialize, Serialize)]
+#[derive_where(Clone, Debug, PartialEq; ChainSpecT::RpcCallRequest, ChainSpecT::RpcTransactionRequest)]
+#[serde(bound = "", tag = "method", content = "params")]
+pub enum MethodInvocation<ChainSpecT: RpcChainSpec> {
     /// `eth_accounts`
     #[serde(rename = "eth_accounts", with = "edr_eth::serde::empty_params")]
     Accounts(()),
@@ -39,7 +42,7 @@ pub enum MethodInvocation {
     /// `eth_call`
     #[serde(rename = "eth_call")]
     Call(
-        CallRequest,
+        ChainSpecT::RpcCallRequest,
         #[serde(
             skip_serializing_if = "Option::is_none",
             default = "optional_block_spec::latest"
@@ -56,7 +59,7 @@ pub enum MethodInvocation {
     /// `eth_estimateGas`
     #[serde(rename = "eth_estimateGas")]
     EstimateGas(
-        CallRequest,
+        ChainSpecT::RpcCallRequest,
         #[serde(
             skip_serializing_if = "Option::is_none",
             default = "optional_block_spec::pending"
@@ -77,8 +80,7 @@ pub enum MethodInvocation {
         /// newest block
         BlockSpec,
         /// reward percentiles
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        Option<Vec<f64>>,
+        Vec<f64>,
     ),
     /// `eth_gasPrice`
     #[serde(rename = "eth_gasPrice", with = "edr_eth::serde::empty_params")]
@@ -139,6 +141,13 @@ pub enum MethodInvocation {
     /// `eth_getLogs`
     #[serde(rename = "eth_getLogs", with = "edr_eth::serde::sequence")]
     GetLogs(LogFilterOptions),
+    /// `eth_getProof`
+    #[serde(rename = "eth_getProof")]
+    GetProof(
+        #[serde(deserialize_with = "crate::requests::serde::deserialize_address")] Address,
+        Vec<StorageKey>,
+        BlockSpec,
+    ),
     /// `eth_getStorageAt`
     #[serde(rename = "eth_getStorageAt")]
     GetStorageAt(
@@ -183,15 +192,6 @@ pub enum MethodInvocation {
         with = "edr_eth::serde::empty_params"
     )]
     MaxPriorityFeePerGas(()),
-    /// `eth_mining`
-    #[serde(rename = "eth_mining", with = "edr_eth::serde::empty_params")]
-    Mining(()),
-    /// `net_listening`
-    #[serde(rename = "net_listening", with = "edr_eth::serde::empty_params")]
-    NetListening(()),
-    /// `net_peerCount`
-    #[serde(rename = "net_peerCount", with = "edr_eth::serde::empty_params")]
-    NetPeerCount(()),
     /// `net_version`
     #[serde(rename = "net_version", with = "edr_eth::serde::empty_params")]
     NetVersion(()),
@@ -218,7 +218,7 @@ pub enum MethodInvocation {
     SendRawTransaction(Bytes),
     /// `eth_sendTransaction`
     #[serde(rename = "eth_sendTransaction", with = "edr_eth::serde::sequence")]
-    SendTransaction(EthTransactionRequest),
+    SendTransaction(ChainSpecT::RpcTransactionRequest),
     /// `personal_sign`
     #[serde(rename = "personal_sign")]
     PersonalSign(
@@ -284,25 +284,18 @@ pub enum MethodInvocation {
     #[serde(rename = "evm_snapshot", with = "edr_eth::serde::empty_params")]
     EvmSnapshot(()),
 
-    // `debug_traceTransaction`
+    // `debug_traceCall`
+    // TODO: Add support for `GethDebugTracingCallOptions`
+    // <https://geth.ethereum.org/docs/interacting-with-geth/rpc/ns-debug#debugtracecall>
     #[serde(rename = "debug_traceCall")]
     DebugTraceCall(
-        CallRequest,
+        ChainSpecT::RpcCallRequest,
         #[serde(default)] Option<BlockSpec>,
-        #[serde(default)] Option<DebugTraceConfig>,
+        #[serde(default)] Option<GethDebugTracingOptions>,
     ),
     // `debug_traceTransaction`
     #[serde(rename = "debug_traceTransaction")]
-    DebugTraceTransaction(B256, #[serde(default)] Option<DebugTraceConfig>),
-
-    /// `hardhat_addCompilationResult`
-    #[serde(rename = "hardhat_addCompilationResult")]
-    AddCompilationResult(
-        /// solc version:
-        String,
-        Box<CompilerInput>,
-        Box<CompilerOutput>,
-    ),
+    DebugTraceTransaction(B256, #[serde(default)] Option<GethDebugTracingOptions>),
     /// `hardhat_dropTransaction`
     #[serde(rename = "hardhat_dropTransaction", with = "edr_eth::serde::sequence")]
     DropTransaction(B256),
@@ -315,9 +308,6 @@ pub enum MethodInvocation {
         with = "edr_eth::serde::sequence"
     )]
     ImpersonateAccount(RpcAddress),
-    /// `hardhat_intervalMine`
-    #[serde(rename = "hardhat_intervalMine", with = "edr_eth::serde::empty_params")]
-    IntervalMine(()),
     /// `hardhat_metadata`
     #[serde(rename = "hardhat_metadata", with = "edr_eth::serde::empty_params")]
     Metadata(()),
@@ -325,23 +315,16 @@ pub enum MethodInvocation {
     #[serde(rename = "hardhat_mine")]
     Mine(
         /// block count:
-        #[serde(default, with = "edr_eth::serde::optional_u64")]
+        #[serde(default, with = "alloy_serde::quantity::opt")]
         Option<u64>,
         /// interval:
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
-            with = "edr_eth::serde::optional_u64"
+            with = "alloy_serde::quantity::opt"
         )]
         Option<u64>,
     ),
-    /// `hardhat_reset`
-    #[serde(
-        rename = "hardhat_reset",
-        serialize_with = "optional_single_to_sequence",
-        deserialize_with = "sequence_to_optional_single"
-    )]
-    Reset(Option<ResetProviderConfig>),
     /// `hardhat_setBalance`
     #[serde(rename = "hardhat_setBalance")]
     SetBalance(
@@ -365,20 +348,20 @@ pub enum MethodInvocation {
     SetLoggingEnabled(bool),
     /// `hardhat_setMinGasPrice`
     #[serde(rename = "hardhat_setMinGasPrice", with = "edr_eth::serde::sequence")]
-    SetMinGasPrice(U256),
+    SetMinGasPrice(U128),
     /// `hardhat_setNextBlockBaseFeePerGas`
     #[serde(
         rename = "hardhat_setNextBlockBaseFeePerGas",
         with = "edr_eth::serde::sequence"
     )]
-    SetNextBlockBaseFeePerGas(U256),
+    SetNextBlockBaseFeePerGas(U128),
     /// `hardhat_setNonce`
     #[serde(rename = "hardhat_setNonce")]
     SetNonce(
         #[serde(deserialize_with = "crate::requests::serde::deserialize_address")] Address,
         #[serde(
             deserialize_with = "crate::requests::serde::deserialize_nonce",
-            serialize_with = "edr_eth::serde::u64::serialize"
+            serialize_with = "alloy_serde::quantity::serialize"
         )]
         u64,
     ),
@@ -400,7 +383,7 @@ pub enum MethodInvocation {
     StopImpersonatingAccount(RpcAddress),
 }
 
-impl MethodInvocation {
+impl<ChainSpecT: RpcChainSpec> MethodInvocation<ChainSpecT> {
     /// Retrieves the instance's method name.
     pub fn method_name(&self) -> &'static str {
         match self {
@@ -427,6 +410,7 @@ impl MethodInvocation {
             MethodInvocation::GetFilterChanges(_) => "eth_getFilterChanges",
             MethodInvocation::GetFilterLogs(_) => "eth_getFilterLogs",
             MethodInvocation::GetLogs(_) => "eth_getLogs",
+            MethodInvocation::GetProof(_, _, _) => "eth_getProof",
             MethodInvocation::GetStorageAt(_, _, _) => "eth_getStorageAt",
             MethodInvocation::GetTransactionByBlockHashAndIndex(_, _) => {
                 "eth_getTransactionByBlockHashAndIndex"
@@ -438,9 +422,6 @@ impl MethodInvocation {
             MethodInvocation::GetTransactionCount(_, _) => "eth_getTransactionCount",
             MethodInvocation::GetTransactionReceipt(_) => "eth_getTransactionReceipt",
             MethodInvocation::MaxPriorityFeePerGas(_) => "eth_maxPriorityFeePerGas",
-            MethodInvocation::Mining(_) => "eth_mining",
-            MethodInvocation::NetListening(_) => "net_listening",
-            MethodInvocation::NetPeerCount(_) => "net_peerCount",
             MethodInvocation::NetVersion(_) => "net_version",
             MethodInvocation::NewBlockFilter(_) => "eth_newBlockFilter",
             MethodInvocation::NewFilter(_) => "eth_newFilter",
@@ -466,14 +447,11 @@ impl MethodInvocation {
             MethodInvocation::EvmSnapshot(_) => "evm_snapshot",
             MethodInvocation::DebugTraceCall(_, _, _) => "debug_traceCall",
             MethodInvocation::DebugTraceTransaction(_, _) => "debug_traceTransaction",
-            MethodInvocation::AddCompilationResult(_, _, _) => "hardhat_addCompilationResult",
             MethodInvocation::DropTransaction(_) => "hardhat_dropTransaction",
             MethodInvocation::GetAutomine(_) => "hardhat_getAutomine",
             MethodInvocation::ImpersonateAccount(_) => "hardhat_impersonateAccount",
-            MethodInvocation::IntervalMine(_) => "hardhat_intervalMine",
             MethodInvocation::Metadata(_) => "hardhat_metadata",
             MethodInvocation::Mine(_, _) => "hardhat_mine",
-            MethodInvocation::Reset(_) => "hardhat_reset",
             MethodInvocation::SetBalance(_, _) => "hardhat_setBalance",
             MethodInvocation::SetCode(_, _) => "hardhat_setCode",
             MethodInvocation::SetCoinbase(_) => "hardhat_setCoinbase",

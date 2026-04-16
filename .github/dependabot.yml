@@ -8,4 +8,7 @@ updates:
     schedule:
       interval: "daily"
     commit-message:
-      prefix: "bump"
+      prefix: "build"
+    cooldown:
+      default-days: 7
+      semver-major-days: 30

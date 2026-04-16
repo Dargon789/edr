@@ -7,10 +7,8 @@ use std::{
     time::Duration,
 };
 
-use edr_eth::{
-    block::{block_time, is_safe_block_number, IsSafeBlockNumberArgs},
-    U64,
-};
+use edr_eth::block::{block_time, is_safe_block_number, IsSafeBlockNumberArgs};
+use edr_primitives::U64;
 use futures::{future, TryFutureExt};
 use hyper::header::HeaderValue;
 pub use hyper::{header, HeaderMap};
@@ -65,7 +63,9 @@ pub enum RpcClientError {
     InvalidJsonRequest(serde_json::Error),
 
     /// The server returned an invalid JSON-RPC response.
-    #[error("Response '{response}' failed to parse with expected type '{expected_type}', due to error: '{error}'")]
+    #[error(
+        "Response '{response}' failed to parse with expected type '{expected_type}', due to error: '{error}'"
+    )]
     InvalidResponse {
         /// The response text
         response: String,
@@ -350,15 +350,15 @@ impl<MethodT: RpcMethod + Serialize> RpcClient<MethodT> {
         result: ResultT,
         resolve_block_number: impl Fn(ResultT) -> Option<u64>,
     ) -> Result<Option<String>, RpcClientError> {
-        if let Some(block_number) = resolve_block_number(result) {
-            if let Some(resolved_cache_key) = block_tag_resolver.resolve_block_tag(block_number) {
-                return match resolved_cache_key {
-                    ResolvedSymbolicTag::NeedsSafetyCheck(safety_checker) => {
-                        self.validate_block_number(safety_checker).await
-                    }
-                    ResolvedSymbolicTag::Resolved(cache_key) => Ok(Some(cache_key)),
-                };
-            }
+        if let Some(block_number) = resolve_block_number(result)
+            && let Some(resolved_cache_key) = block_tag_resolver.resolve_block_tag(block_number)
+        {
+            return match resolved_cache_key {
+                ResolvedSymbolicTag::NeedsSafetyCheck(safety_checker) => {
+                    self.validate_block_number(safety_checker).await
+                }
+                ResolvedSymbolicTag::Resolved(cache_key) => Ok(Some(cache_key)),
+            };
         }
         Ok(None)
     }
@@ -556,7 +556,8 @@ impl<MethodT: RpcMethod + Serialize> RpcClient<MethodT> {
                         error,
                     } => {
                         log::error!(
-                            "Failed to deserialize item from RPC response cache. error: '{error}' expected type: '{expected_type}'. item: '{response}'");
+                            "Failed to deserialize item from RPC response cache. error: '{error}' expected type: '{expected_type}'. item: '{response}'"
+                        );
                     }
                     // For other errors, return early.
                     _ => return Err(error),
@@ -666,11 +667,7 @@ impl SerializedRequest {
 
 #[cfg(test)]
 mod tests {
-    use std::ops::Deref;
-
     use edr_eth::PreEip1898BlockSpec;
-    use hyper::StatusCode;
-    use tempfile::TempDir;
 
     use self::cache::{
         block_spec::{
@@ -842,63 +839,45 @@ mod tests {
         }
     }
 
-    struct TestRpcClient {
-        client: RpcClient<TestMethod>,
-
-        // Need to keep the tempdir around to prevent it from being deleted
-        // Only accessed when feature = "test-remote", hence the allow.
-        #[allow(dead_code)]
-        cache_dir: TempDir,
-    }
-
-    impl TestRpcClient {
-        fn new(url: &str) -> Self {
-            let tempdir = TempDir::new().unwrap();
-            Self {
-                client: RpcClient::new(url, tempdir.path().into(), None).expect("url ok"),
-                cache_dir: tempdir,
-            }
-        }
-    }
-
-    impl Deref for TestRpcClient {
-        type Target = RpcClient<TestMethod>;
-
-        fn deref(&self) -> &Self::Target {
-            &self.client
-        }
-    }
-
-    #[tokio::test]
-    async fn call_bad_api_key() {
-        let api_key = "invalid-api-key";
-        let alchemy_url = format!("https://eth-mainnet.g.alchemy.com/v2/{api_key}");
-
-        let error = TestRpcClient::new(&alchemy_url)
-            .call::<U64>(TestMethod::BlockNumber(()))
-            .await
-            .expect_err("should have failed to interpret response as a Transaction");
-
-        assert!(!error.to_string().contains(api_key));
-
-        if let RpcClientError::HttpStatus(error) = error {
-            assert_eq!(
-                reqwest::Error::from(error).status(),
-                Some(StatusCode::from_u16(401).unwrap())
-            );
-        } else {
-            unreachable!("Invalid error: {error}");
-        }
-    }
-
     #[cfg(feature = "test-remote")]
     mod alchemy {
-        use edr_eth::U64;
-        use edr_test_utils::env::get_alchemy_url;
+        use std::ops::Deref;
+
+        use edr_primitives::U64;
+        use edr_test_utils::env::json_rpc_url_provider;
         use futures::future::join_all;
+        use hyper::StatusCode;
+        use tempfile::TempDir;
         use walkdir::WalkDir;
 
         use super::*;
+
+        struct TestRpcClient {
+            client: RpcClient<TestMethod>,
+
+            // Need to keep the tempdir around to prevent it from being deleted
+            // Only accessed when feature = "test-remote", hence the allow.
+            #[allow(dead_code)]
+            cache_dir: TempDir,
+        }
+
+        impl TestRpcClient {
+            fn new(url: &str) -> Self {
+                let tempdir = TempDir::new().unwrap();
+                Self {
+                    client: RpcClient::new(url, tempdir.path().into(), None).expect("url ok"),
+                    cache_dir: tempdir,
+                }
+            }
+        }
+
+        impl Deref for TestRpcClient {
+            type Target = RpcClient<TestMethod>;
+
+            fn deref(&self) -> &Self::Target {
+                &self.client
+            }
+        }
 
         impl TestRpcClient {
             fn files_in_cache(&self) -> Vec<PathBuf> {
@@ -917,8 +896,30 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn call_bad_api_key() {
+            let api_key = "invalid-api-key";
+            let alchemy_url = format!("https://eth-mainnet.g.alchemy.com/v2/{api_key}");
+
+            let error = TestRpcClient::new(&alchemy_url)
+                .call::<U64>(TestMethod::BlockNumber(()))
+                .await
+                .expect_err("should have failed to interpret response as a Transaction");
+
+            assert!(!error.to_string().contains(api_key));
+
+            if let RpcClientError::HttpStatus(error) = error {
+                assert_eq!(
+                    reqwest::Error::from(error).status(),
+                    Some(StatusCode::from_u16(401).unwrap())
+                );
+            } else {
+                unreachable!("Invalid error: {error}");
+            }
+        }
+
+        #[tokio::test]
         async fn concurrent_writes_to_cache_smoke_test() {
-            let client = TestRpcClient::new(&get_alchemy_url());
+            let client = TestRpcClient::new(&json_rpc_url_provider::ethereum_mainnet());
 
             let test_contents = "some random test data 42";
             let cache_key = "cache-key";
@@ -938,7 +939,7 @@ mod tests {
 
         #[tokio::test]
         async fn get_block_by_number_with_transaction_data_unsafe_no_cache() -> anyhow::Result<()> {
-            let alchemy_url = get_alchemy_url();
+            let alchemy_url = json_rpc_url_provider::ethereum_mainnet();
             let client = TestRpcClient::new(&alchemy_url);
 
             assert_eq!(client.files_in_cache().len(), 0);
@@ -979,7 +980,7 @@ mod tests {
 
         #[tokio::test]
         async fn is_cacheable_block_number() {
-            let client = TestRpcClient::new(&get_alchemy_url());
+            let client = TestRpcClient::new(&json_rpc_url_provider::ethereum_mainnet());
 
             let latest_block_number = client.block_number().await.unwrap();
 
@@ -998,7 +999,7 @@ mod tests {
 
         #[tokio::test]
         async fn network_id_from_cache() {
-            let alchemy_url = get_alchemy_url();
+            let alchemy_url = json_rpc_url_provider::ethereum_mainnet();
             let client = TestRpcClient::new(&alchemy_url);
 
             assert_eq!(client.files_in_cache().len(), 0);

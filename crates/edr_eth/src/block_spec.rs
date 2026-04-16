@@ -3,7 +3,7 @@ use std::{
     fmt::{Display, Formatter},
 };
 
-use crate::B256;
+use edr_primitives::B256;
 
 /// for representing block specifications per EIP-1898
 #[derive(Clone, Debug, PartialEq)]
@@ -24,10 +24,7 @@ pub enum Eip1898BlockSpec {
     #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
     Number {
         /// the block number
-        #[cfg_attr(
-            feature = "serde",
-            serde(serialize_with = "crate::serde::u64::serialize")
-        )]
+        #[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))]
         block_number: u64,
     },
 }
@@ -42,9 +39,8 @@ impl<'de> serde::Deserialize<'de> for Eip1898BlockSpec {
     {
         use std::borrow::Cow;
 
+        use edr_primitives::U64;
         use serde::de;
-
-        use crate::U64;
 
         const BLOCK_HASH_FIELD: &str = "blockHash";
         const REQUIRE_CANONICAL_FIELD: &str = "requireCanonical";
@@ -184,13 +180,7 @@ impl Display for BlockTag {
 #[cfg_attr(feature = "serde", serde(untagged))]
 pub enum BlockSpec {
     /// as a block number
-    Number(
-        #[cfg_attr(
-            feature = "serde",
-            serde(serialize_with = "crate::serde::u64::serialize")
-        )]
-        u64,
-    ),
+    Number(#[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))] u64),
     /// as a block tag (eg "latest")
     Tag(BlockTag),
     /// as an EIP-1898-compliant block specifier
@@ -205,7 +195,7 @@ impl<'de> serde::de::Deserialize<'de> for BlockSpec {
     where
         D: serde::de::Deserializer<'de>,
     {
-        use crate::U64;
+        use edr_primitives::U64;
 
         struct BlockSpecVisitor;
 
@@ -303,7 +293,7 @@ impl Display for BlockSpec {
 #[cfg_attr(feature = "serde", serde(untagged))]
 pub enum PreEip1898BlockSpec {
     /// as a block number
-    Number(#[cfg_attr(feature = "serde", serde(with = "crate::serde::u64"))] u64),
+    Number(#[cfg_attr(feature = "serde", serde(with = "alloy_serde::quantity"))] u64),
     /// as a block tag (eg "latest")
     Tag(BlockTag),
 }
@@ -321,10 +311,10 @@ impl_block_tags!(PreEip1898BlockSpec);
 
 #[cfg(all(test, feature = "serde"))]
 mod tests {
+    use edr_primitives::U256;
     use serde_json::json;
 
     use super::*;
-    use crate::U256;
 
     fn help_test_block_spec_serde(block_spec: BlockSpec) {
         let json = serde_json::json!(block_spec).to_string();

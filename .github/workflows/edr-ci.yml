@@ -1,6 +1,8 @@
 name: EDR
 
 on:
+  merge_group:
+    types: [checks_requested]
   push:
     branches:
       - main
@@ -9,26 +11,75 @@ on:
       - "**"
   workflow_dispatch:
 
-env:
-  RUSTFLAGS: -Dwarnings
-  RUSTDOCFLAGS: -Dwarnings
-
 concurrency:
   group: ${{github.workflow}}-${{github.ref}}
   cancel-in-progress: true
 
 jobs:
+  check-edr-safety:
+    name: Check EDR dependencies safety (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      # disable for "windows-2025" due to error: Path Validation Error:
+      # Path(s) specified in the action for caching do(es) not exist,
+      # hence no cache is being saved.
+      # https://github.com/NomicFoundation/edr/issues/1199
+      matrix:
+        os: ["ubuntu-24.04", "macos-15"]
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          persist-credentials: false
+      - uses: socketdev/action@4337a545deecc20f19a909e52db7a2f6ba292f42 # v1
+        with:
+          mode: firewall
+      - uses: ./.github/actions/setup-rust
+      - uses: ./.github/actions/setup-node
+
+      - name: Pnpm safety
+        run: sfw pnpm install --frozen-lockfile --prefer-offline
+
   check-edr:
     name: Check EDR
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    needs: check-edr-safety
+    env:
+      RUSTFLAGS: -Dwarnings
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+
+      - name: Cargo check no default features for all crates
+        run: cargo check --workspace --all-targets --no-default-features --locked
+
+  cargo-hack-edr:
+    name: cargo-hack check EDR
+    runs-on: ubuntu-24.04
+    needs: check-edr
+    permissions:
+      contents: read
+    env:
+      RUSTFLAGS: -Dwarnings
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          persist-credentials: false
+
       - uses: ./.github/actions/setup-rust
 
       # Install pre-built binaries for cargo hack
-      - uses: taiki-e/install-action@cargo-hack
+      - uses: taiki-e/install-action@8cd2ac21dc357ca7dd807fe294d11e9ef84f60ec # v2.62.53
+        with:
+          tool: cargo-hack@0.6.39
 
-      - run: cargo hack check --feature-powerset --no-dev-deps
+      - name: Cargo hack check for EDR crates
+        run: |
+          chmod +x ./.github/scripts/cargo-hack-edr.sh
+          ./.github/scripts/cargo-hack-edr.sh
+        shell: bash
 
   test-edr-rs:
     name: Test EDR (${{ matrix.os }})
@@ -37,29 +88,50 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ["ubuntu-latest", "macos-latest", "windows-latest"]
+        os: ["ubuntu-24.04", "macos-15", "windows-2025"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup-rust
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          persist-credentials: false
 
-      - name: Cache EDR RPC cache
-        uses: actions/cache@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@8cd2ac21dc357ca7dd807fe294d11e9ef84f60ec # v2.62.53
+        with:
+          tool: cargo-llvm-cov@0.6.21
+
+      - name: Restore EDR RPC cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             **/edr-cache
-          key: edr-rs-rpc-cache-v1
+          key: edr-rs-rpc-cache-v1-${{ matrix.os }}
 
-      - name: Build cargo tests
-        run: cargo test --workspace --all-targets --all-features --no-run
-
-      - name: Run cargo test
+      - name: Run cargo tests (with coverage)
         env:
           ALCHEMY_URL: ${{ secrets.ALCHEMY_URL }}
-          INFURA_URL: ${{ secrets.INFURA_URL }}
-        run: cargo test --workspace --all-targets --all-features
+        run: cargo llvm-cov --workspace --all-targets --all-features --locked --no-fail-fast --codecov --output-path codecov.json
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@5a1091511ad55cbe89839c7260b706298ca349f7 # v5.5.1
+        with:
+          files: codecov.json
+          name: ${{ matrix.os }}
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Doctests
-        run: cargo test --doc --workspace --features tracing
+        run: cargo test --doc --workspace --features tracing --locked --no-fail-fast
+
+      - name: Save EDR RPC cache
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            **/edr-cache
+          key: edr-rs-rpc-cache-v1-${{ matrix.os }}-${{ hashFiles('**/edr-cache/**/*') }}
 
       # disable until:
       # 1) https://github.com/napi-rs/napi-rs/issues/1405 is resolved (Windows-only)
@@ -76,12 +148,79 @@ jobs:
       #     ALCHEMY_URL: ${{ secrets.ALCHEMY_URL }}
       #   run: cargo nextest run --workspace --all-features --all-targets
 
+  test-edr-ts:
+    name: Test EDR TS bindings (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: check-edr
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20]
+        os: [ubuntu-24.04, macos-15, windows-2025]
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-node
+        with:
+          node-version: ${{ matrix.node }}
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@8cd2ac21dc357ca7dd807fe294d11e9ef84f60ec # v2.62.53
+        with:
+          tool: cargo-llvm-cov@0.6.21
+
+      - name: Restore EDR RPC cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            **/edr-cache
+          key: edr-ts-rpc-cache-v1-${{ matrix.os }}
+
+      - name: Install package
+        run: pnpm install --frozen-lockfile --prefer-offline
+
+      - name: Run tests
+        env:
+          ALCHEMY_URL: ${{ secrets.ALCHEMY_URL }}
+          # Enables chalk colors in CI, required for logs tests
+          FORCE_COLOR: 3
+        shell: bash
+        run: |
+          source <(cargo llvm-cov show-env --export-prefix)
+          pnpm -C crates/edr_napi test
+          # `--release` included to match `build:dev` compilation flags
+          cargo llvm-cov report --release --locked --codecov --output-path codecov.json
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@5a1091511ad55cbe89839c7260b706298ca349f7 # v5.5.1
+        with:
+          files: codecov.json
+          name: ${{ matrix.os }}
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Save EDR RPC cache
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            **/edr-cache
+          key: edr-ts-rpc-cache-v1-${{ matrix.os }}-${{ hashFiles('**/edr-cache/**/*') }}
+
   edr-style:
     name: Check EDR Style
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: check-edr
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          persist-credentials: false
+
       - uses: ./.github/actions/setup-rust
         with:
           components: clippy
@@ -91,48 +230,102 @@ jobs:
         with:
           toolchain: nightly
           components: rustfmt
+          cache: false # already set up in previous step
 
       - name: Run cargo fmt
         run: cargo +nightly fmt --all --check
 
       - name: Run cargo clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
   edr-docs:
     name: Build EDR Docs
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: check-edr
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          persist-credentials: false
+
       - uses: ./.github/actions/setup-rust
 
       - name: Cargo doc
-        run: cargo doc --workspace --no-deps --all-features
+        run: |
+          chmod +x ./.github/scripts/cargo-doc.sh
+          ./.github/scripts/cargo-doc.sh
+        shell: bash
 
-  lint:
-    name: Run Prettier
-    runs-on: ubuntu-latest
+  build-and-lint:
+    name: Build and lint
+    runs-on: ubuntu-24.04
+    needs: check-edr-safety
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          persist-credentials: false
+
       - uses: ./.github/actions/setup-node
 
       - name: Install package
         run: pnpm install --frozen-lockfile --prefer-offline
+      - name: Run build script
+        run: pnpm run build:dev
       - name: Run lint script
         run: pnpm run lint
 
   edr-napi-typings-file:
     name: Check that edr_napi typings file is up to date
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    needs: check-edr-safety
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          persist-credentials: false
+
       - uses: ./.github/actions/setup-node
 
       - name: Install package
         run: pnpm install --frozen-lockfile --prefer-offline
 
       - name: Build edr_napi
-        run: cd crates/edr_napi && pnpm build
+        run: cd crates/edr_napi && pnpm build:typingFile
 
       - name: Check that there are no uncommitted changes
         run: git diff --exit-code
+  edr-integration-tests:
+    name: Run integration tests
+    runs-on: ubuntu-24.04
+    needs: check-edr-safety
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-node
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@8cd2ac21dc357ca7dd807fe294d11e9ef84f60ec # v2.62.53
+        with:
+          tool: cargo-llvm-cov@0.6.21
+
+      - name: Install package
+        run: pnpm install --frozen-lockfile --prefer-offline
+
+      - name: Run integration tests
+        shell: bash
+        run: |
+          source <(cargo llvm-cov show-env --export-prefix)
+          pnpm run --recursive --filter './js/integration-tests/*' test
+          # `--release` included to match `build:dev` compilation flags
+          cargo llvm-cov report --release --locked --codecov --output-path codecov.json
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@5a1091511ad55cbe89839c7260b706298ca349f7 # v5.5.1
+        with:
+          files: codecov.json
+          name: ubuntu-24.04
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
