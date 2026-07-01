@@ -75,8 +75,8 @@ pub fn dry_run<
     // ```
     EvmChainSpecT: EvmChainSpec,
     BlockT: BlockEnvTrait,
-    BlockchainT: BlockHashByNumber<Error: std::error::Error>,
-    StateT: State<Error: std::error::Error>,
+    BlockchainT: BlockHashByNumber<Error: 'static + std::error::Error + Send + Sync>,
+    StateT: State<Error: 'static + std::error::Error + Send + Sync>,
 >(
     blockchain: BlockchainT,
     state: StateT,
@@ -94,7 +94,7 @@ pub fn dry_run<
     let database = WrapDatabaseRef(DatabaseComponents { blockchain, state });
 
     let mut precompile_provider = OverriddenPrecompileProvider::with_precompiles(
-        EvmChainSpecT::PrecompileProvider::default(),
+        EvmChainSpecT::new_precompile_provider(cfg.spec),
         custom_precompiles.clone(),
     );
 
@@ -120,7 +120,7 @@ pub fn dry_run_with_inspector<
     // ```
     EvmChainSpecT: EvmChainSpec,
     BlockT: BlockEnvTrait,
-    BlockchainT: BlockHashByNumber<Error: std::error::Error>,
+    BlockchainT: BlockHashByNumber<Error: 'static + std::error::Error + Send + Sync>,
     InspectorT: Inspector<
         ContextForChainSpec<
             EvmChainSpecT,
@@ -128,7 +128,7 @@ pub fn dry_run_with_inspector<
             WrapDatabaseRef<DatabaseComponents<BlockchainT, StateT>>,
         >,
     >,
-    StateT: State<Error: std::error::Error>,
+    StateT: State<Error: 'static + std::error::Error + Send + Sync>,
 >(
     blockchain: BlockchainT,
     state: StateT,
@@ -147,7 +147,7 @@ pub fn dry_run_with_inspector<
     let database = WrapDatabaseRef(DatabaseComponents { blockchain, state });
 
     let mut precompile_provider = OverriddenPrecompileProvider::with_precompiles(
-        EvmChainSpecT::PrecompileProvider::default(),
+        EvmChainSpecT::new_precompile_provider(cfg.spec),
         custom_precompiles.clone(),
     );
 
@@ -179,8 +179,8 @@ pub fn guaranteed_dry_run<
     // ```
     EvmChainSpecT: EvmChainSpec,
     BlockT: BlockEnvTrait,
-    BlockchainT: BlockHashByNumber<Error: std::error::Error>,
-    StateT: State<Error: std::error::Error>,
+    BlockchainT: BlockHashByNumber<Error: 'static + std::error::Error + Send + Sync>,
+    StateT: State<Error: 'static + std::error::Error + Send + Sync>,
 >(
     blockchain: BlockchainT,
     state: StateT,
@@ -221,7 +221,7 @@ pub fn guaranteed_dry_run_with_inspector<
     // ```
     EvmChainSpecT: EvmChainSpec,
     BlockT: BlockEnvTrait,
-    BlockchainT: BlockHashByNumber<Error: std::error::Error>,
+    BlockchainT: BlockHashByNumber<Error: 'static + std::error::Error + Send + Sync>,
     InspectorT: Inspector<
         ContextForChainSpec<
             EvmChainSpecT,
@@ -229,7 +229,7 @@ pub fn guaranteed_dry_run_with_inspector<
             WrapDatabaseRef<DatabaseComponents<BlockchainT, StateT>>,
         >,
     >,
-    StateT: State<Error: std::error::Error>,
+    StateT: State<Error: 'static + std::error::Error + Send + Sync>,
 >(
     blockchain: BlockchainT,
     state: StateT,
@@ -270,8 +270,8 @@ pub fn run<
     // ```
     EvmChainSpecT: EvmChainSpec,
     BlockT: BlockEnvTrait,
-    BlockchainT: BlockHashByNumber<Error: std::error::Error>,
-    StateT: State<Error: std::error::Error> + StateCommit,
+    BlockchainT: BlockHashByNumber<Error: 'static + std::error::Error + Send + Sync>,
+    StateT: State<Error: 'static + std::error::Error + Send + Sync> + StateCommit,
 >(
     blockchain: BlockchainT,
     mut state: StateT,

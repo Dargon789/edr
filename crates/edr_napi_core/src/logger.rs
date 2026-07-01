@@ -38,7 +38,7 @@ pub struct Config {
     pub print_line_fn: Arc<dyn PrintLineFn>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub enum LoggingState {
     CollapsingMethod(CollapsedMethod),
     HardhatMinining {
@@ -47,6 +47,7 @@ pub enum LoggingState {
     IntervalMining {
         empty_blocks_range_start: Option<u64>,
     },
+    #[default]
     Empty,
 }
 
@@ -69,12 +70,6 @@ impl LoggingState {
             } => empty_blocks_range_start,
             _ => None,
         }
-    }
-}
-
-impl Default for LoggingState {
-    fn default() -> Self {
-        Self::Empty
     }
 }
 
@@ -659,7 +654,7 @@ impl<ChainSpecT: ProviderSpec<TimerT>, TimerT: Clone + TimeSinceEpoch>
                 "Gas used",
                 format!(
                     "{gas_used} of {gas_limit}",
-                    gas_used = result.gas_used(),
+                    gas_used = result.tx_gas_used(),
                     gas_limit = transaction.gas_limit()
                 ),
             );
@@ -1048,7 +1043,7 @@ impl<ChainSpecT: ProviderSpec<TimerT>, TimerT: Clone + TimeSinceEpoch>
                 "Gas used",
                 format!(
                     "{gas_used} of {gas_limit}",
-                    gas_used = transaction_result.gas_used(),
+                    gas_used = transaction_result.tx_gas_used(),
                     gas_limit = transaction.gas_limit()
                 ),
             );

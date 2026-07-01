@@ -3410,14 +3410,7 @@ fn inner_start_gas_snapshot<
 ) -> Result {
     // Revert if there is an active gas snapshot as we can only have one active
     // snapshot at a time.
-    if ccx.state.gas_metering.active_gas_snapshot.is_some() {
-        let (group, name) = ccx
-            .state
-            .gas_metering
-            .active_gas_snapshot
-            .as_ref()
-            .unwrap()
-            .clone();
+    if let Some((group, name)) = ccx.state.gas_metering.active_gas_snapshot.as_ref() {
         bail!("gas snapshot was already started with group: {group} and name: {name}");
     }
 
@@ -3468,17 +3461,25 @@ fn inner_stop_gas_snapshot<
     group: Option<String>,
     name: Option<String>,
 ) -> Result {
-    // If group and name are not provided, use the last snapshot group and name.
-    let (group, name) = group.zip(name).unwrap_or_else(|| {
-        let (group, name) = ccx
-            .state
-            .gas_metering
-            .active_gas_snapshot
-            .as_ref()
-            .unwrap()
-            .clone();
-        (group, name)
-    });
+    // Resolve group and name, falling back to the active snapshot for any
+    // missing component.
+    let (group, name) = match (
+        group,
+        name,
+        ccx.state.gas_metering.active_gas_snapshot.as_ref(),
+    ) {
+        (Some(group), Some(name), _) => (group, name),
+        (Some(group), None, Some((_, active_name))) => (group, active_name.clone()),
+        (None, Some(name), Some((active_group, _))) => (active_group.clone(), name),
+        (None, None, Some((active_group, active_name))) => {
+            (active_group.clone(), active_name.clone())
+        }
+        _ => {
+            // If there is no active snapshot and either group or name is missing,
+            // we cannot resolve the snapshot to stop.
+            bail!("no gas snapshot was started; call startSnapshotGas() first");
+        }
+    };
 
     if let Some(record) = ccx
         .state
@@ -3563,6 +3564,7 @@ fn derive_snapshot_name<
             .name
     });
     let name = name.unwrap_or_else(|| "default".to_string());
+
     (group, name)
 }
 
