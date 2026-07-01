@@ -10,12 +10,10 @@ edr_chain_spec.workspace = true
 edr_primitives.workspace = true
 edr_receipt.workspace = true
 edr_solidity.workspace = true
-edr_state_api.workspace = true
 edr_transaction.workspace = true
+revm-inspectors.workspace = true
 thiserror.workspace = true
 serde.workspace = true
-
-comfy-table = "7"
 
 [features]
 tracing = ["edr_solidity/tracing"]

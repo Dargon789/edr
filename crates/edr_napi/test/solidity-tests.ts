@@ -27,6 +27,7 @@ describe("Solidity Tests", () => {
     // All artifacts are test suites.
     const testSuites = artifacts.map((artifact) => artifact.id);
     const config = {
+      disableTransactionGasCap: true,
       projectRoot: __dirname,
       hardfork: l1HardforkToString(l1HardforkLatest()),
     };
@@ -107,6 +108,38 @@ describe("Solidity Tests", () => {
     );
   });
 
+  it("rejects invalid eip712CanonicalTypes as InvalidArg", async function () {
+    // Boundary check only: an invalid eip712CanonicalTypes entry must
+    // reject with an InvalidArg error. The exhaustive semantics
+    // (collecting every bad entry, duplicate detection, etc.) are covered
+    // by `parse_eip712_canonical_types` unit tests in the cheatcodes crate.
+    const artifacts = [
+      loadContract("./data/artifacts/default/SetupConsistencyCheck.json"),
+    ];
+    const testSuites = artifacts.map((artifact) => artifact.id);
+    const config = {
+      projectRoot: __dirname,
+      hardfork: l1HardforkToString(l1HardforkLatest()),
+      eip712CanonicalTypes: ["gibberish"],
+    };
+
+    let error: any;
+    try {
+      await runAllSolidityTests(
+        context,
+        L1_CHAIN_TYPE,
+        artifacts,
+        testSuites,
+        config
+      );
+    } catch (e) {
+      error = e;
+    }
+
+    assert.isDefined(error);
+    assert.equal(error.code, "InvalidArg");
+  });
+
   it("filters tests according to pattern", async function () {
     const artifacts = [
       loadContract("./data/artifacts/default/SetupConsistencyCheck.json"),
@@ -120,6 +153,7 @@ describe("Solidity Tests", () => {
       artifacts,
       testSuites,
       {
+        disableTransactionGasCap: true,
         projectRoot: __dirname,
         hardfork: l1HardforkToString(l1HardforkLatest()),
         testPattern: "Multiply",

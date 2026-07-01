@@ -1,15 +1,15 @@
-use edr_primitives::{Address, HashMap, U256};
+use edr_primitives::{Address, U256};
 
 use crate::{
     account::{Account, AccountInfo, AccountStatus},
-    EvmStorageSlot,
+    EvmState, EvmStorage, EvmStorageSlot,
 };
 
 /// The difference between two states, which can be applied to a state to get
 /// the new state using [`crate::StateCommit::commit`].
 #[derive(Clone, Debug, Default)]
 pub struct StateDiff {
-    inner: HashMap<Address, Account>,
+    inner: EvmState,
 }
 
 impl StateDiff {
@@ -22,8 +22,9 @@ impl StateDiff {
                 account.info = account_info.clone();
             })
             .or_insert(Account {
-                info: account_info,
-                storage: HashMap::default(),
+                info: account_info.clone(),
+                original_info: Box::new(account_info),
+                storage: EvmStorage::default(),
                 status: AccountStatus::Touched,
                 transaction_id: 0,
             });
@@ -48,10 +49,12 @@ impl StateDiff {
                 account.storage.insert(index, slot.clone());
             })
             .or_insert_with(|| {
-                let storage: HashMap<_, _> = std::iter::once((index, slot.clone())).collect();
+                let storage: EvmStorage = std::iter::once((index, slot.clone())).collect();
 
+                let info = account_info.unwrap_or_default();
                 Account {
-                    info: account_info.unwrap_or_default(),
+                    info: info.clone(),
+                    original_info: Box::new(info),
                     storage,
                     status: AccountStatus::Created | AccountStatus::Touched,
                     transaction_id: 0,
@@ -61,7 +64,7 @@ impl StateDiff {
 
     /// Applies a state diff to this instance, combining with any and all
     /// existing changes.
-    pub fn apply_diff(&mut self, diff: HashMap<Address, Account>) {
+    pub fn apply_diff(&mut self, diff: EvmState) {
         for (address, account_diff) in diff {
             self.inner
                 .entry(address)
@@ -75,18 +78,18 @@ impl StateDiff {
     }
 
     /// Retrieves the inner hash map.
-    pub fn as_inner(&self) -> &HashMap<Address, Account> {
+    pub fn as_inner(&self) -> &EvmState {
         &self.inner
     }
 }
 
-impl From<HashMap<Address, Account>> for StateDiff {
-    fn from(value: HashMap<Address, Account>) -> Self {
+impl From<EvmState> for StateDiff {
+    fn from(value: EvmState) -> Self {
         Self { inner: value }
     }
 }
 
-impl From<StateDiff> for HashMap<Address, Account> {
+impl From<StateDiff> for EvmState {
     fn from(value: StateDiff) -> Self {
         value.inner
     }

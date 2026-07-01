@@ -424,6 +424,7 @@ mod tests {
     use edr_state_api::{
         account::{Account, AccountInfo, AccountStatus},
         irregular::IrregularState,
+        EvmState,
     };
 
     use super::*;
@@ -446,13 +447,14 @@ mod tests {
                     *address,
                     Account {
                         info: info.clone(),
+                        original_info: Box::new(info.clone()),
                         storage: HashMap::default(),
                         status: AccountStatus::Created | AccountStatus::Touched,
                         transaction_id: 0,
                     },
                 )
             })
-            .collect::<HashMap<_, _>>()
+            .collect::<EvmState>()
             .into();
 
         let chain_config = l1_chain_config(edr_chain_l1::chains::L1_MAINNET_CHAIN_ID)
