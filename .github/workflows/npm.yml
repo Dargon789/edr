@@ -77,6 +77,7 @@ jobs:
           ls -la "$ARTIFACT_DIR" || true
 
       - name: Download Release Assets
+        if: ${{ github.event_name == 'workflow_run' }}
         uses: actions/download-artifact@v5
         with:
           merge-multiple: true
@@ -88,9 +89,10 @@ jobs:
           repository: ${{ github.repository }}
           workflow: release.yml
           if_no_artifact_found: fail
-          run-id: ${{ github.event.workflow_run.id || inputs.run_id }}
+          run-id: ${{ github.event.workflow_run.id }}
 
       - name: Validate Downloaded Artifacts
+        if: ${{ github.event_name == 'workflow_run' }}
         env:
           ARTIFACT_DIR: ${{ steps.paths.outputs.artifact_dir }}
         run: |
@@ -163,6 +165,7 @@ jobs:
           registry-url: "https://registry.npmjs.org"
 
       - name: Ensure npm workspace is unmodified and clean
+        if: ${{ github.event_name == 'workflow_run' }}
         run: |
           set -euo pipefail
           # Re-assert trust boundary: restore npm workspace tracked files from checked-out commit.
@@ -182,10 +185,12 @@ jobs:
           fi
 
       - name: Install Dependencies
+        if: ${{ github.event_name == 'workflow_run' }}
         working-directory: ./npm
         run: bun install --frozen-lockfile
 
       - name: Re-Validate Artifact Archive Contents
+        if: ${{ github.event_name == 'workflow_run' }}
         env:
           ARTIFACT_DIR: ${{ steps.paths.outputs.artifact_dir }}
         run: |
