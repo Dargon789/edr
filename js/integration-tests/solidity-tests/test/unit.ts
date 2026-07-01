@@ -1,0 +1,710 @@
+import assert from "node:assert/strict";
+import { before, describe, it } from "node:test";
+import {
+  assertImpureCheatcode,
+  assertStackTraces,
+  TestContext,
+} from "./testContext.js";
+import {
+  CheatcodeErrorCode,
+  CollectStackTraces,
+  L1_CHAIN_TYPE,
+  OP_CHAIN_TYPE,
+  SuiteResult,
+  TestStatus,
+} from "@nomicfoundation/edr";
+
+describe("Unit tests", () => {
+  let testContext: TestContext;
+
+  before(async () => {
+    testContext = await TestContext.setup();
+  });
+
+  it("SuccessAndFailure", async function () {
+    const { totalTests, failedTests, stackTraces } =
+      await testContext.runTestsWithStats("SuccessAndFailureTest");
+
+    assertStackTraces(
+      stackTraces.get("testThatFails()"),
+      "1 is not equal to 2",
+      [{ contract: "SuccessAndFailureTest", function: "testThatFails" }]
+    );
+
+    assert.equal(failedTests, 1);
+    assert.equal(totalTests, 2);
+  });
+
+  it("Latest global fork stack trace", async function (t) {
+    if (testContext.rpcUrl === undefined) {
+      return t.skip();
+    }
+
+    const { totalTests, failedTests, stackTraces } =
+      await testContext.runTestsWithStats("SuccessAndFailureTest", {
+        ethRpcUrl: testContext.rpcUrl,
+      });
+
+    assert.equal(failedTests, 1);
+    assert.equal(totalTests, 2);
+    // When using forking from latest block, no stack trace should be generated as re-execution is unsafe.
+    const stackTrace = stackTraces.get("testThatFails()");
+    if (
+      stackTrace === undefined ||
+      stackTrace.stackTrace?.kind !== "UnsafeToReplay"
+    ) {
+      throw new Error(
+        `Expected unsafe to replay stack trace, instead it is: {stackTrace}`
+      );
+    }
+    assert.equal(stackTrace.stackTrace.globalForkLatest, true);
+  });
+
+  it("ContractEnvironment", async function () {
+    const { totalTests, failedTests } = await testContext.runTestsWithStats(
+      "ContractEnvironmentTest",
+      {
+        sender: new Uint8Array(
+          Buffer.from("976EA74026E726554dB657fA54763abd0C3a0aa9", "hex")
+        ),
+        chainId: 12n,
+        blockNumber: 23n,
+        blockTimestamp: 45n,
+      }
+    );
+
+    assert.equal(failedTests, 0);
+    assert.equal(totalTests, 1);
+  });
+
+  describe("IsolateMode", function () {
+    it("IsolateMode on", async function () {
+      const { totalTests, failedTests, stackTraces } =
+        await testContext.runTestsWithStats("IsolateTest", {
+          isolate: true,
+        });
+
+      assert.equal(failedTests, 0);
+      assert.equal(totalTests, 2);
+    });
+
+    it("IsolateMode off", async function () {
+      const { totalTests, failedTests } =
+        await testContext.runTestsWithStats("IsolateTest");
+
+      assert.equal(failedTests, 1);
+      assert.equal(totalTests, 2);
+    });
+  });
+
+  it("TestFail", async function () {
+    const { totalTests, failedTests, stackTraces } =
+      await testContext.runTestsWithStats("TestFailTest");
+    assert.equal(totalTests, 1);
+    assert.equal(failedTests, 1);
+    assert.ok(
+      stackTraces
+        .get("testFailRevert()")
+        ?.reason?.includes("`testFail*` has been removed")
+    );
+  });
+
+  it("EnvVarTest", async function () {
+    process.env._EDR_SOLIDITY_TESTS_GET_ENV_TEST_KEY =
+      "_edrSolidityTestsGetEnvTestVal";
+
+    const { totalTests, failedTests } =
+      await testContext.runTestsWithStats("EnvVarTest");
+
+    assert.equal(failedTests, 0);
+    assert.equal(totalTests, 1);
+  });
+
+  it("GlobalFork", async function (t) {
+    if (testContext.rpcUrl === undefined) {
+      return t.skip();
+    }
+
+    const { totalTests, failedTests } = await testContext.runTestsWithStats(
+      "GlobalForkTest",
+      {
+        ethRpcUrl: testContext.rpcUrl,
+        forkBlockNumber: 20_000_000n,
+      }
+    );
+
+    assert.equal(failedTests, 0);
+    assert.equal(totalTests, 1);
+  });
+
+  it("ForkCheatcode", async function (t) {
+    if (testContext.rpcUrl === undefined) {
+      return t.skip();
+    }
+
+    const { totalTests, failedTests } = await testContext.runTestsWithStats(
+      "ForkCheatcodeTest",
+      {
+        rpcEndpoints: {
+          alchemyMainnet: testContext.rpcUrl!,
+        },
+      }
+    );
+
+    assert.equal(failedTests, 0);
+    assert.equal(totalTests, 1);
+  });
+
+  it("Latest fork cheatcode", async function (t) {
+    if (testContext.rpcUrl === undefined) {
+      return t.skip();
+    }
+
+    const { totalTests, failedTests, stackTraces } =
+      await testContext.runTestsWithStats("LatestForkCheatcodeTest", {
+        rpcEndpoints: {
+          alchemyMainnet: testContext.rpcUrl!,
+        },
+      });
+
+    assert.equal(failedTests, 1);
+    assert.equal(totalTests, 1);
+
+    let stackTrace = stackTraces.get("testThatFails()");
+    assertImpureCheatcode(stackTrace, "createSelectFork");
+  });
+
+  it("LibraryMultifork", async function (t) {
+    if (testContext.rpcUrl === undefined) {
+      return t.skip();
+    }
+
+    const { totalTests, failedTests, stackTraces } =
+      await testContext.runTestsWithStats("LibraryMultiForkTest", {
+        rpcEndpoints: {
+          alchemyMainnet: testContext.rpcUrl!,
+        },
+      });
+
+    assert.equal(failedTests, 0);
+    assert.equal(totalTests, 1);
+  });
+
+  it("ForkStateSetup", async function (t) {
+    if (testContext.rpcUrl === undefined) {
+      return t.skip();
+    }
+
+    const { totalTests, failedTests, stackTraces } =
+      await testContext.runTestsWithStats("ForkStateSetupTest", {
+        rpcEndpoints: {
+          mainnet: testContext.rpcUrl!,
+          base: testContext.rpcUrl!.replace("eth-mainnet", "base-mainnet"),
+        },
+      });
+
+    assert.equal(totalTests, 2);
+    assert.equal(failedTests, 0);
+  });
+
+  it("FailingSetup", async function () {
+    const { totalTests, failedTests, stackTraces } =
+      await testContext.runTestsWithStats("FailingSetupTest");
+
+    assertStackTraces(
+      stackTraces.get("setUp()"),
+      "invalid rpc url: nonExistentForkAlias",
+      [{ contract: "FailingSetupTest", function: "setUp" }]
+    );
+
+    assert.equal(failedTests, 1);
+    assert.equal(totalTests, 1);
+  });
+
+  it("FailingDeploy", async function () {
+    const { totalTests, failedTests, stackTraces } =
+      await testContext.runTestsWithStats("FailingDeployTest");
+
+    assertStackTraces(stackTraces.get("constructor()"), "Deployment failed", [
+      { contract: "FailingDeployTest", function: "constructor" },
+    ]);
+
+    assert.equal(failedTests, 1);
+    assert.equal(totalTests, 1);
+  });
+
+  it("LinkingTest", async function () {
+    const { totalTests, failedTests } =
+      await testContext.runTestsWithStats("LinkingTest");
+
+    assert.equal(failedTests, 0);
+    assert.equal(totalTests, 1);
+  });
+
+  it("LinkingTest", async function () {
+    const { totalTests, failedTests } =
+      await testContext.runTestsWithStats("LinkingTest");
+
+    assert.equal(failedTests, 0);
+    assert.equal(totalTests, 1);
+  });
+
+  it("CounterDifferentSolc", async function () {
+    const { totalTests, failedTests } = await testContext.runTestsWithStats(
+      "CounterDifferentSolcTest"
+    );
+
+    assert.equal(failedTests, 0);
+    assert.equal(totalTests, 1);
+  });
+
+  it("CounterSameSolc", async function () {
+    const { totalTests, failedTests } = await testContext.runTestsWithStats(
+      "CounterSameSolcTest"
+    );
+
+    assert.equal(failedTests, 0);
+    assert.equal(totalTests, 1);
+  });
+
+  it("UnsupportedCheatcode", async function () {
+    const { totalTests, failedTests, stackTraces } =
+      await testContext.runTestsWithStats("UnsupportedCheatcodeTest");
+
+    assertStackTraces(
+      stackTraces.get("testUnsupportedCheatcode()"),
+      "UnsupportedCheatcode: broadcast()",
+      [
+        {
+          contract: "UnsupportedCheatcodeTest",
+          function: "testUnsupportedCheatcode",
+          message: "cheatcode 'broadcast()' is not supported",
+          errorDetails: {
+            code: CheatcodeErrorCode.UnsupportedCheatcode,
+            cheatcode: "broadcast()",
+          },
+          line: 9,
+        },
+      ]
+    );
+    assert.equal(failedTests, 1);
+    assert.equal(totalTests, 1);
+  });
+
+  it("MissingCheatcode", async function () {
+    const { totalTests, failedTests, stackTraces } =
+      await testContext.runTestsWithStats("MissingCheatcodeTest");
+
+    assertStackTraces(
+      stackTraces.get("testMissingCheatcode()"),
+      "MissingCheatcode: getEvmVersion()",
+      [
+        {
+          contract: "MissingCheatcodeTest",
+          function: "testMissingCheatcode",
+          message: "cheatcode 'getEvmVersion()' is missing",
+          errorDetails: {
+            code: CheatcodeErrorCode.MissingCheatcode,
+            cheatcode: "getEvmVersion()",
+          },
+          line: 15,
+        },
+      ]
+    );
+    assert.equal(failedTests, 1);
+    assert.equal(totalTests, 1);
+  });
+
+  it("L1Chain", async function () {
+    const { totalTests, failedTests, stackTraces } =
+      await testContext.runTestsWithStats(
+        "L1ChainTest",
+        undefined,
+        L1_CHAIN_TYPE
+      );
+
+    assert.equal(totalTests, 1);
+    assert.equal(failedTests, 0);
+  });
+
+  it("OpChain", async function () {
+    const { totalTests, failedTests } = await testContext.runTestsWithStats(
+      "OpChainTest",
+      undefined,
+      OP_CHAIN_TYPE
+    );
+
+    assert.equal(totalTests, 1);
+    assert.equal(failedTests, 0);
+  });
+
+  it("Gas snapshot cheatcodes", async function () {
+    const { totalTests, failedTests, suiteResults } =
+      await testContext.runTestsWithStats("GasSnapshotTest", {}, L1_CHAIN_TYPE);
+
+    assert.equal(totalTests, 15);
+    assert.equal(failedTests, 3);
+
+    let snapshots = new Map<string, Map<string, string>>();
+
+    for (const suiteResult of suiteResults) {
+      for (const testResult of suiteResult.testResults) {
+        if (testResult.name === "testMismatchedStartStopSnapshot()") {
+          assert.equal(testResult.status, "Failure");
+          assert.equal(
+            testResult.reason,
+            "vm.stopSnapshotGas: no gas snapshot was started with the name: testMismatchedStopSnapshot in group: GasSnapshotTest"
+          );
+          continue;
+        }
+
+        if (testResult.name === "testMissingStartSnapshot()") {
+          assert.equal(testResult.status, "Failure");
+          assert.equal(
+            testResult.reason,
+            "vm.stopSnapshotGas: no gas snapshot was started; call startSnapshotGas() first"
+          );
+          continue;
+        }
+
+        if (testResult.name === "testMissingStartSnapshotWithGroup()") {
+          assert.equal(testResult.status, "Failure");
+          assert.equal(
+            testResult.reason,
+            "vm.stopSnapshotGas: no gas snapshot was started with the name: testMissingStartSnapshot in group: testGroup"
+          );
+          continue;
+        }
+
+        assert.notEqual(testResult.valueSnapshotGroups, undefined);
+
+        const snapshotGroups = testResult.valueSnapshotGroups!;
+
+        assert(
+          snapshotGroups.length > 0,
+          "All gas snapshot tests should have at least one scoped snapshot"
+        );
+
+        // Collect all snapshots from the groups
+        for (const group of snapshotGroups) {
+          let snapshot = snapshots.get(group.name);
+          if (snapshot === undefined) {
+            snapshot = new Map<string, string>();
+            snapshots.set(group.name, snapshot);
+          }
+
+          for (const entry of group.entries) {
+            snapshot.set(entry.name, entry.value);
+          }
+        }
+      }
+    }
+
+    assert.deepEqual(
+      snapshots,
+      new Map([
+        [
+          "CustomGroup",
+          new Map([
+            ["e", "456"],
+            ["i", "456"],
+            ["o", "123"],
+            ["q", "789"],
+            ["testSnapshotGasLastCallGroupName", "45084"],
+            ["testSnapshotGasSection", "5857385"],
+            ["testSnapshotGasSectionGroupName", "5857815"],
+            ["x", "123"],
+            ["z", "789"],
+          ]),
+        ],
+        [
+          "GasSnapshotTest",
+          new Map([
+            ["a", "123"],
+            ["b", "456"],
+            ["c", "789"],
+            ["d", "123"],
+            ["e", "456"],
+            ["f", "789"],
+            ["testAssertGasExternal", "50260"],
+            ["testAssertGasInternalA", "22047"],
+            ["testAssertGasInternalB", "1011"],
+            ["testAssertGasInternalC", "1010"],
+            ["testAssertGasInternalD", "20911"],
+            ["testAssertGasInternalE", "1011"],
+            ["testSnapshotGasLastCallName", "45084"],
+            ["testSnapshotGasSection", "5857385"],
+            ["testSnapshotGasSectionName", "5857625"],
+          ]),
+        ],
+      ])
+    );
+  });
+
+  describe("InternalExpectRevert", async function () {
+    it("allowInternalExpectRevert is true", async function () {
+      const { totalTests, failedTests } = await testContext.runTestsWithStats(
+        "InternalExpectRevertTest",
+        {
+          allowInternalExpectRevert: true,
+        },
+        L1_CHAIN_TYPE
+      );
+
+      assert.equal(totalTests, 1);
+      assert.equal(failedTests, 0);
+    });
+
+    it("allowInternalExpectRevert default", async function () {
+      const { totalTests, failedTests, stackTraces } =
+        await testContext.runTestsWithStats(
+          "InternalExpectRevertTest",
+          undefined,
+          L1_CHAIN_TYPE
+        );
+
+      assert.equal(totalTests, 1);
+      assert.equal(failedTests, 1);
+
+      const stackTrace = stackTraces.get("testInternalExpectRevert()");
+      assert.equal(
+        stackTrace?.reason,
+        "call didn't revert at a lower depth than cheatcode call depth"
+      );
+    });
+  });
+
+  // Test that test suite results are returned in the order of completion and immediately after they're done.
+  it("StreamingResults", async function () {
+    const chainType = L1_CHAIN_TYPE;
+    const testSuites = [
+      "FirstReturnTest",
+      "SecondReturnTest",
+      "ThirdReturnTest",
+    ];
+    const testSuiteIds = testContext.matchingTests(new Set(testSuites));
+    const config = testContext.defaultConfig(chainType);
+
+    const results: {
+      testResults: { testSuiteResult: SuiteResult; time: bigint }[];
+      start: bigint;
+    } = await new Promise((resolve, reject) => {
+      const testResults: { testSuiteResult: SuiteResult; time: bigint }[] = [];
+      const start = process.hrtime.bigint();
+      testContext.edrContext
+        .runSolidityTests(
+          chainType,
+          testContext.artifacts,
+          testSuiteIds,
+          config,
+          testContext.tracingConfig,
+          (testSuiteResult) => {
+            testResults.push({
+              testSuiteResult,
+              time: process.hrtime.bigint(),
+            });
+            // Test timeout will handle it if this is never hit
+            if (testResults.length == testSuiteIds.length) {
+              resolve({ testResults, start });
+            }
+          }
+        )
+        .catch(reject);
+    });
+    const elapsed = process.hrtime.bigint() - results.start;
+
+    assert.equal(results.testResults.length, 3);
+
+    assert(
+      Number(results.testResults[0].time) / Number(elapsed) > 2,
+      `Time for first test is not more than 2x of starting test execution: first test ${results.testResults[0].time} vs prevTime ${elapsed}`
+    );
+
+    for (let i = 0; i < results.testResults.length; i++) {
+      const suiteResult = results.testResults[i].testSuiteResult;
+
+      assert.equal(suiteResult.id.name, testSuites[i]);
+      assert.equal(suiteResult.testResults.length, 1);
+      assert.equal(suiteResult.testResults[0].status, TestStatus.Success);
+
+      if (i > 0) {
+        const time = results.testResults[i].time - results.start;
+        const prevTime = results.testResults[i - 1].time - results.start;
+        assert(
+          Number(time) / Number(prevTime) > 2,
+          `Time for test ${i} is not greater than 2x: time ${time} vs prevTime ${prevTime}`
+        );
+      }
+    }
+  });
+
+  it("ExpectRevertError", async function () {
+    const { totalTests, failedTests, stackTraces } =
+      await testContext.runTestsWithStats("ExpectRevertErrorTest");
+
+    assert.equal(failedTests, 3);
+    assert.equal(totalTests, 3);
+
+    assertStackTraces(
+      stackTraces.get("testFunctionDoesntRevertAsExpected()"),
+      "next call did not revert as expected",
+      [
+        {
+          contract: "ExpectRevertErrorTest",
+          function: "testFunctionDoesntRevertAsExpected",
+          line: 19, // foo.f();
+          message: "next call did not revert as expected",
+        },
+      ]
+    );
+
+    assertStackTraces(
+      stackTraces.get("testFunctionRevertsWithDifferentMessage()"),
+      "Error != expected error: revert with a different message != expected message",
+      [
+        {
+          contract: "ExpectRevertErrorTest",
+          function: "testFunctionRevertsWithDifferentMessage",
+          line: 25, // foo.g();
+          message:
+            "Error != expected error: revert with a different message != expected message",
+        },
+      ]
+    );
+
+    assertStackTraces(
+      stackTraces.get("testFunctionRevertCountMismatch()"),
+      "next call did not revert as expected",
+      [
+        {
+          contract: "ExpectRevertErrorTest",
+          function: "testFunctionRevertCountMismatch",
+          line: 32, // foo.f();
+          message: "next call did not revert as expected",
+        },
+      ]
+    );
+  });
+
+  describe("ExpectEmitError", function () {
+    async function expectEmitErrorTest(isolate: boolean) {
+      const { totalTests, failedTests, stackTraces } =
+        await testContext.runTestsWithStats("ExpectEmitErrorTest", { isolate });
+
+      assert.equal(failedTests, 1);
+      assert.equal(totalTests, 2);
+
+      assertStackTraces(
+        stackTraces.get("testExpectEmitShouldFail()"),
+        "log != expected log",
+        [
+          {
+            contract: "ExpectEmitErrorTest",
+            function: "testExpectEmitShouldFail",
+            line: 43,
+            message: "log != expected log",
+          },
+        ]
+      );
+    }
+
+    it("isolate off", async function () {
+      await expectEmitErrorTest(false);
+    });
+
+    // Repro for https://github.com/NomicFoundation/hardhat/issues/7677
+    it("isolate on", async function () {
+      await expectEmitErrorTest(true);
+    });
+  });
+
+  describe("Stack traces for a contract with impure cheatcodes, that is unsafe to replay", function () {
+    it("By default, don't generate a stack trace", async function () {
+      const { totalTests, failedTests, stackTraces } =
+        await testContext.runTestsWithStats("StackTraceUnsafeToReplay");
+
+      assert.equal(failedTests, 1);
+      assert.equal(totalTests, 1);
+      const stackTrace = stackTraces.get("testThatFails()");
+      if (
+        stackTrace === undefined ||
+        stackTrace.stackTrace?.kind !== "UnsafeToReplay"
+      ) {
+        throw new Error(
+          `Expected unsafe to replay stack trace, instead it is: ${stackTrace}`
+        );
+      }
+    });
+
+    it("When explicitly requesting `CollectStackTraces.OnFailure`, don't generate a stack trace", async function () {
+      const { totalTests, failedTests, stackTraces } =
+        await testContext.runTestsWithStats("StackTraceUnsafeToReplay", {
+          collectStackTraces: CollectStackTraces.OnFailure,
+        });
+
+      assert.equal(failedTests, 1);
+      assert.equal(totalTests, 1);
+
+      const stackTrace = stackTraces.get("testThatFails()");
+      if (
+        stackTrace === undefined ||
+        stackTrace.stackTrace?.kind !== "UnsafeToReplay"
+      ) {
+        throw new Error(
+          `Expected unsafe to replay stack trace, instead it is: ${stackTrace}`
+        );
+      }
+    });
+
+    it("When explicitly requesting `CollectStackTraces.Always`, generate a stack trace", async function () {
+      const { totalTests, failedTests, stackTraces } =
+        await testContext.runTestsWithStats("StackTraceUnsafeToReplay", {
+          collectStackTraces: CollectStackTraces.Always,
+        });
+
+      assert.equal(failedTests, 1);
+      assert.equal(totalTests, 1);
+
+      const stackTrace = stackTraces.get("testThatFails()");
+      assert(stackTrace !== undefined);
+    });
+  });
+
+  describe("FunctionLevelConfigOverride", function () {
+    it("AllowInternalExepectRevert", async function () {
+      const artifact = testContext.matchingTest("InternalRevertingTest")[0];
+      const testFunctionOverrides = [
+        {
+          identifier: {
+            contractArtifact: artifact,
+            functionSelector: "0x3a1da94e", // testInternalRevert()
+          },
+          config: {
+            allowInternalExpectRevert: true,
+          },
+        },
+      ];
+
+      const result = await testContext.runTestsWithStats(
+        "InternalRevertingTest",
+        {
+          testFunctionOverrides,
+        }
+      );
+
+      assert.equal(result.totalTests, 1);
+      assert.equal(result.failedTests, 0);
+    });
+  });
+
+  describe("Precompiles", function () {
+    it("EIP7212 Precompile", async function () {
+      const { totalTests, failedTests } =
+        await testContext.runTestsWithStats("EIP7212Test");
+
+      // Checks are done in the test. Just check that the test passed.
+      assert.equal(failedTests, 0);
+      assert.equal(totalTests, 1);
+    });
+  });
+});
