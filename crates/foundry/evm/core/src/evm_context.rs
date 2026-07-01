@@ -1,4 +1,4 @@
-use std::ops::DerefMut;
+use std::{ops::DerefMut, str::FromStr};
 
 use alloy_primitives::{Address, Bytes, TxKind, B256, U256};
 use foundry_fork_db::DatabaseError;
@@ -13,7 +13,7 @@ use revm::{
     context_interface::{transaction::AccessList, Block, JournalTr, Transaction},
     handler::{instructions::EthInstructions, EthFrame, EthPrecompiles, PrecompileProvider},
     interpreter::{interpreter::EthInterpreter, InterpreterResult},
-    primitives::hardfork::SpecId,
+    primitives::hardfork::{SpecId, UnknownHardfork},
     state::EvmState,
     Database, InspectEvm, Inspector, Journal, JournalEntry,
 };
@@ -24,12 +24,28 @@ use crate::{
 };
 
 pub trait HardforkTr:
-    'static + Copy + std::fmt::Debug + Default + Into<SpecId> + Send + Sync + Unpin
+    'static
+    + Copy
+    + std::fmt::Debug
+    + Default
+    + FromStr<Err = UnknownHardfork>
+    + Into<SpecId>
+    + Send
+    + Sync
+    + Unpin
 {
 }
 
 impl<T> HardforkTr for T where
-    T: 'static + Copy + std::fmt::Debug + Default + Into<SpecId> + Send + Sync + Unpin
+    T: 'static
+        + Copy
+        + std::fmt::Debug
+        + Default
+        + FromStr<Err = UnknownHardfork>
+        + Into<SpecId>
+        + Send
+        + Sync
+        + Unpin
 {
 }
 
@@ -103,11 +119,10 @@ pub trait EvmBuilderTrait<
     >;
 
     /// Type of the precompile provider used in the EVM.
-    type PrecompileProvider<DatabaseT: Database>: Default
-        + PrecompileProvider<
-            EthInstructionsContext<BlockT, TransactionT, HardforkT, DatabaseT, ChainContextT>,
-            Output = InterpreterResult,
-        >;
+    type PrecompileProvider<DatabaseT: Database>: PrecompileProvider<
+        EthInstructionsContext<BlockT, TransactionT, HardforkT, DatabaseT, ChainContextT>,
+        Output = InterpreterResult,
+    >;
 
     fn evm_with_inspector<
         DatabaseT: Database,
@@ -190,6 +205,7 @@ impl
         env: EvmEnvWithChainContext<BlockEnv, TxEnv, SpecId, ()>,
         inspector: InspectorT,
     ) -> Self::Evm<DatabaseT, InspectorT> {
+        let hardfork = env.cfg.spec;
         let context = revm::Context {
             tx: env.tx,
             block: env.block,
@@ -203,8 +219,8 @@ impl
         Evm::new_with_inspector(
             context,
             inspector,
-            EthInstructions::default(),
-            EthPrecompiles::default(),
+            EthInstructions::new_mainnet_with_spec(hardfork),
+            EthPrecompiles::new(hardfork),
         )
     }
 }
@@ -718,12 +734,29 @@ where
 }
 
 /// EVM execution environment with chain context.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct EvmEnvWithChainContext<BlockT, TxT, HardforkT, ChainContextT> {
     pub block: BlockT,
     pub tx: TxT,
     pub cfg: CfgEnv<HardforkT>,
     pub chain_context: ChainContextT,
+}
+
+impl<
+        BlockT: Default,
+        TxT: Default,
+        HardforkT: Default + Into<revm::primitives::hardfork::SpecId> + Clone,
+        ChainContextT: Default,
+    > Default for EvmEnvWithChainContext<BlockT, TxT, HardforkT, ChainContextT>
+{
+    fn default() -> Self {
+        Self {
+            block: BlockT::default(),
+            tx: TxT::default(),
+            cfg: CfgEnv::default(),
+            chain_context: ChainContextT::default(),
+        }
+    }
 }
 
 impl<BlockT, TxT, HardforkT, ChainContextT>

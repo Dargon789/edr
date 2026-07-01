@@ -25,6 +25,7 @@ pub enum GasReportExecutionStatus {
 pub struct DeploymentGasReport {
     pub gas: BigInt,
     pub size: BigInt,
+    pub runtime_size: BigInt,
     pub status: GasReportExecutionStatus,
 }
 
@@ -32,6 +33,11 @@ pub struct DeploymentGasReport {
 pub struct FunctionGasReport {
     pub gas: BigInt,
     pub status: GasReportExecutionStatus,
+    /// The proxy delegation chain for this call, if the called contract is a
+    /// proxy. Contains contract identifiers from outermost proxy to final
+    /// implementation, e.g. `["Proxy", "Implementation"]`.
+    /// Empty if the call is not through a proxy.
+    pub proxy_chain: Vec<String>,
 }
 
 impl From<edr_gas_report::GasReport> for GasReport {
@@ -77,6 +83,7 @@ impl From<edr_gas_report::DeploymentGasReport> for DeploymentGasReport {
         Self {
             gas: BigInt::from(value.gas),
             size: BigInt::from(value.size),
+            runtime_size: BigInt::from(value.runtime_size),
             status: value.status.into(),
         }
     }
@@ -87,6 +94,7 @@ impl From<edr_gas_report::FunctionGasReport> for FunctionGasReport {
         Self {
             gas: BigInt::from(value.gas),
             status: value.status.into(),
+            proxy_chain: value.proxy_chain,
         }
     }
 }

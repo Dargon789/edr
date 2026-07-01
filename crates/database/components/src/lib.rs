@@ -2,11 +2,8 @@
 #![warn(missing_docs)]
 
 use edr_blockchain_api::BlockHashByNumber;
-use edr_primitives::{Address, Bytecode, HashMap, B256, U256};
-use edr_state_api::{
-    account::{Account, AccountInfo},
-    State, StateCommit,
-};
+use edr_primitives::{Address, Bytecode, B256, U256};
+use edr_state_api::{account::AccountInfo, EvmState, State, StateCommit};
 use revm_database_interface::{DBErrorMarker, DatabaseRef};
 pub use revm_database_interface::{Database, WrapDatabaseRef};
 
@@ -32,13 +29,16 @@ pub enum DatabaseComponentError<BlockchainErrorT, StateErrorT> {
 
 impl<BlockchainErrorT, StateErrorT> DBErrorMarker
     for DatabaseComponentError<BlockchainErrorT, StateErrorT>
+where
+    BlockchainErrorT: 'static + std::error::Error + Send + Sync,
+    StateErrorT: 'static + std::error::Error + Send + Sync,
 {
 }
 
 impl<BlockchainT, StateT> DatabaseRef for DatabaseComponents<BlockchainT, StateT>
 where
-    BlockchainT: BlockHashByNumber<Error: std::error::Error>,
-    StateT: State<Error: std::error::Error>,
+    BlockchainT: BlockHashByNumber<Error: 'static + std::error::Error + Send + Sync>,
+    StateT: State<Error: 'static + std::error::Error + Send + Sync>,
 {
     type Error = DatabaseComponentError<BlockchainT::Error, StateT::Error>;
 
@@ -68,7 +68,7 @@ where
 impl<BlockchainT: BlockHashByNumber, StateT: StateCommit> StateCommit
     for DatabaseComponents<BlockchainT, StateT>
 {
-    fn commit(&mut self, changes: HashMap<Address, Account>) {
+    fn commit(&mut self, changes: EvmState) {
         self.state.commit(changes);
     }
 }

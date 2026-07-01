@@ -264,8 +264,28 @@ export interface IntervalRange {
 /** Configuration for the provider's miner. */
 export interface MiningConfig {
   autoMine: boolean
+  /**
+   * The block gas limit to use for mining a block.
+   *
+   * When not set, enforcement of the block gas limit is disabled in the mem
+   * pool, miner, and REVM.
+   */
+  blockGasLimit?: bigint
   interval?: bigint | IntervalRange
   memPool: MemPoolConfig
+}
+/** Configuration for a locally mined blockchain. */
+export interface LocalConfig {
+  /**
+   * The blob gas used for the genesis block, introduced in [EIP-4844].
+   *
+   * [EIP-4844]: https://eips.ethereum.org/EIPS/eip-4844
+   */
+  genesisBlobGas?: BlobGas
+  /** The block gas limit of the genesis block. */
+  genesisBlockGasLimit: bigint
+  /** The date, in seconds since the Unix epoch, of the genesis block. */
+  genesisBlockTime?: bigint
 }
 /** Configuration for runtime observability. */
 export interface ObservabilityConfig {
@@ -302,17 +322,15 @@ export interface ProviderConfig {
    * will be used.
    */
   baseFeeConfig?: Array<BaseFeeParamActivation>
-  /** The gas limit of each block */
-  blockGasLimit: bigint
   /** The chain ID of the blockchain */
   chainId: bigint
   /** The address of the coinbase */
   coinbase: Uint8Array
   /**
-   * The configuration for forking a blockchain. If not provided, a local
-   * blockchain will be created
+   * The default transaction gas limit to use for RPC call and transaction
+   * requests that do not specify a `gas` value.
    */
-  fork?: ForkConfig
+  defaultTransactionGasLimit: bigint
   /** The genesis state of the blockchain */
   genesisState: Array<AccountOverride>
   /** The hardfork of the blockchain */
@@ -322,10 +340,6 @@ export interface ProviderConfig {
    * transactions and later
    */
   initialBaseFeePerGas?: bigint
-  /** The initial blob gas of the blockchain. Required for EIP-4844 */
-  initialBlobGas?: BlobGas
-  /** The initial date of the blockchain, in seconds since the Unix epoch */
-  initialDate?: bigint
   /**
    * The initial parent beacon block root of the blockchain. Required for
    * EIP-4788
@@ -335,6 +349,8 @@ export interface ProviderConfig {
   minGasPrice: bigint
   /** The configuration for the miner */
   mining: MiningConfig
+  /** The network configuration for the provider. */
+  network: ForkConfig | LocalConfig
   /** The network ID of the blockchain */
   networkId: bigint
   /** The configuration for the provider's observability */
@@ -346,11 +362,17 @@ export interface ProviderConfig {
   /**
    * Transaction gas cap, introduced in [EIP-7825].
    *
-   * When not set, will default to value defined by the used hardfork
+   * Integer values should be larger than zero.
+   *
+   * When `false`, enforcement of the transaction gas cap is disabled and
+   * transactions with any `gas` value are accepted by the mempool and
+   * executed without REVM's transaction gas cap check.
+   *
+   * When not set, a hardfork-specific default value will be used.
    *
    * [EIP-7825]: https://eips.ethereum.org/EIPS/eip-7825
    */
-  transactionGasCap?: bigint
+  transactionGasCap?: bigint | false
 }
 /** Tracing config for Solidity stack trace generation. */
 export interface TracingConfigWithBuffers {
@@ -417,11 +439,19 @@ export enum GasReportExecutionStatus {
 export interface DeploymentGasReport {
   gas: bigint
   size: bigint
+  runtimeSize: bigint
   status: GasReportExecutionStatus
 }
 export interface FunctionGasReport {
   gas: bigint
   status: GasReportExecutionStatus
+  /**
+   * The proxy delegation chain for this call, if the called contract is a
+   * proxy. Contains contract identifiers from outermost proxy to final
+   * implementation, e.g. `["Proxy", "Implementation"]`.
+   * Empty if the call is not through a proxy.
+   */
+  proxyChain: Array<string>
 }
 export interface InstrumentationResult {
   /** The generated source code with coverage instrumentation. */
@@ -452,11 +482,13 @@ export interface InstrumentationMetadata {
    */
   readonly endUtf16: number
 }
+/** The instrumentation coverage library file name. */
+export const COVERAGE_LIBRARY_FILE_NAME: string
 /**
  * Adds per-statement coverage instrumentation to the given Solidity source
  * code.
  */
-export declare function addStatementCoverageInstrumentation(sourceCode: string, sourceId: string, solidityVersion: string, coverageLibraryPath: string): InstrumentationResult
+export declare function addStatementCoverageInstrumentation(sourceCode: string, sourceId: string, solidityVersion: string): InstrumentationResult
 /** Retrieves the latest version of `Solidity` supported for instrumentation. */
 export declare function latestSupportedSolidityVersion(): string
 /** Ethereum execution log. */
@@ -512,6 +544,8 @@ export interface SuccessResult {
 export interface RevertResult {
   /** The amount of gas used */
   gasUsed: bigint
+  /** The logs */
+  logs: Array<ExecutionLog>
   /** The transaction output */
   output: Uint8Array
 }
@@ -547,6 +581,8 @@ export interface HaltResult {
    * gas limit
    */
   gasUsed: bigint
+  /** The logs */
+  logs: Array<ExecutionLog>
 }
 /** The result of executing a transaction. */
 export interface ExecutionResult {
@@ -710,10 +746,20 @@ export interface SolidityTestRunnerConfigArgs {
    */
   disableBlockGasLimit?: boolean
   /**
-   * Whether to enable the EIP-7825 (Osaka) transaction gas limit cap.
-   * Defaults to false.
+   * Transaction gas cap, introduced in [EIP-7825].
+   *
+   * When not set, defaults to the value defined by the used hardfork.
+   *
+   * [EIP-7825]: https://eips.ethereum.org/EIPS/eip-7825
    */
-  enableTxGasLimitCap?: boolean
+  transactionGasCap?: bigint
+  /**
+   * Whether to disable the [EIP-7825] transaction gas cap.
+   * Defaults to false.
+   *
+   * [EIP-7825]: https://eips.ethereum.org/EIPS/eip-7825
+   */
+  disableTransactionGasCap?: boolean
   /**
    * The memory limit of the EVM in bytes.
    * Defaults to `33_554_432` (2^25 = 32MiB).
@@ -787,6 +833,40 @@ export interface SolidityTestRunnerConfigArgs {
    * Defaults to none.
    */
   testFunctionOverrides?: Array<TestFunctionOverride>
+  /**
+   * A list of EIP-712 canonical type definitions that can be referenced by
+   * type name in the `eip712HashType` and `eip712HashStruct` cheatcodes.
+   *
+   * Each entry is an independent, self-contained type definition. A
+   * definition that references nested struct types must inline those
+   * struct definitions, per the EIP-712 `encodeType` spec.
+   *
+   * Only the primary (leftmost) type of each entry is registered by name.
+   * Nested struct types referenced inside an entry are *not* registered
+   * under their own names. To look up a nested struct by name from a
+   * cheatcode, add it as a separate top-level entry whose primary type
+   * is the nested struct.
+   *
+   * The type of a struct is encoded as:
+   *
+   * `name ‖ "(" ‖ member₁ ‖ "," ‖ member₂ ‖ "," ‖ … ‖ memberₙ ")"`
+   *
+   * where each member is written as `type ‖ " " ‖ name`.
+   *
+   * Entries that fail to parse cause a startup error listing every bad
+   * entry.
+   *
+   * Example — to make both `Mail` and `Person` reachable by name:
+   *
+   * ```text
+   * "Mail(Person from,Person to,string contents)Person(address wallet,string name)"
+   * "Person(address wallet,string name)"
+   * ```
+   *
+   * With *only* the first entry, `vm.eip712HashType("Mail")` works but
+   * `vm.eip712HashType("Person")` fails with an unknown-type error.
+   */
+  eip712CanonicalTypes?: Array<string>
 }
 /** Fuzz testing configuration */
 export interface FuzzConfigArgs {
@@ -832,6 +912,11 @@ export interface FuzzConfigArgs {
    * Defaults to true.
    */
   includePushBytes?: boolean
+  /**
+   * Show `console.log` in fuzz test.
+   * Defaults to false.
+   */
+  showLogs?: boolean
   /**
    * Optional timeout (in seconds) for each property test.
    * Defaults to none (no timeout).
@@ -1005,6 +1090,20 @@ export interface TestFunctionConfigOverride {
    * as the test.
    */
   allowInternalExpectRevert?: boolean
+  /**
+   * Whether to enable isolation of calls for the test. In isolation mode all
+   * top-level calls are executed as a separate transaction in a separate
+   * EVM context, enabling more precise gas accounting and transaction
+   * state changes.
+   * Ignored when gas reporting is enabled, as isolation is required for
+   * accurate gas measurements.
+   */
+  isolate?: boolean
+  /**
+   * The EVM version to use for this test, e.g. "Cancun". This will override
+   * the global EVM version.
+   */
+  evmVersion?: string
   /** Configuration override for fuzz testing. */
   fuzz?: FuzzConfigOverride
   /** Configuration override for invariant testing. */

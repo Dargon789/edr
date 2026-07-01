@@ -53,16 +53,17 @@ impl BlockChainSpec for L1ChainSpec {
     type Block =
         dyn SyncBlock<Arc<Self::Receipt>, Self::SignedTransaction, Error = Self::FetchReceiptError>;
 
-    type BlockBuilder<'builder, BlockchainErrorT: 'builder + std::error::Error> = EthBlockBuilder<
-        'builder,
-        Self::Receipt,
-        Self::Block,
-        BlockchainErrorT,
-        Self,
-        Self::ExecutionReceiptBuilder,
-        Self,
-        Self::LocalBlock,
-    >;
+    type BlockBuilder<'builder, BlockchainErrorT: 'static + std::error::Error + Send + Sync> =
+        EthBlockBuilder<
+            'builder,
+            Self::Receipt,
+            Self::Block,
+            BlockchainErrorT,
+            Self,
+            Self::ExecutionReceiptBuilder,
+            Self,
+            Self::LocalBlock,
+        >;
 
     type FetchReceiptError =
         FetchRemoteReceiptError<<Self::Receipt as TryFrom<Self::RpcReceipt>>::Error>;
@@ -87,6 +88,12 @@ impl ContextChainSpec for L1ChainSpec {
 impl EvmChainSpec for L1ChainSpec {
     type PrecompileProvider<BlockEnvT: BlockEnvTrait, DatabaseT: Database> = EthPrecompiles;
 
+    fn new_precompile_provider<BlockEnvT: BlockEnvTrait, DatabaseT: Database>(
+        hardfork: Self::Hardfork,
+    ) -> Self::PrecompileProvider<BlockEnvT, DatabaseT> {
+        EthPrecompiles::new(hardfork)
+    }
+
     fn dry_run<
         BlockEnvT: BlockEnvTrait,
         DatabaseT: Database,
@@ -107,6 +114,7 @@ impl EvmChainSpec for L1ChainSpec {
             <Self::SignedTransaction as TransactionValidation>::ValidationError,
         >,
     > {
+        let hardfork = cfg.spec;
         let context = Context {
             block,
             tx: transaction,
@@ -117,7 +125,11 @@ impl EvmChainSpec for L1ChainSpec {
             error: Ok(()),
         };
 
-        let mut evm = Evm::new(context, EthInstructions::default(), precompile_provider);
+        let mut evm = Evm::new(
+            context,
+            EthInstructions::new_mainnet_with_spec(hardfork),
+            precompile_provider,
+        );
 
         evm.replay().map_err(TransactionError::from)
     }
@@ -144,6 +156,7 @@ impl EvmChainSpec for L1ChainSpec {
             <Self::SignedTransaction as TransactionValidation>::ValidationError,
         >,
     > {
+        let hardfork = cfg.spec;
         let context = Context {
             block,
             // We need to pass a transaction here to properly initialize the context.
@@ -161,7 +174,7 @@ impl EvmChainSpec for L1ChainSpec {
         let mut evm = Evm::new_with_inspector(
             context,
             inspector,
-            EthInstructions::default(),
+            EthInstructions::new_mainnet_with_spec(hardfork),
             precompile_provider,
         );
 
@@ -219,7 +232,12 @@ impl ProviderChainSpec for L1ChainSpec {
         hardfork: Self::Hardfork,
         default_base_fee_params: &BaseFeeParams<Self::Hardfork>,
     ) -> u128 {
-        calculate_next_base_fee_per_gas(header, default_base_fee_params, hardfork)
+        calculate_next_base_fee_per_gas(
+            header,
+            u128::from(header.gas_used),
+            default_base_fee_params,
+            hardfork,
+        )
     }
 
     fn default_schedulded_blob_params() -> Option<ScheduledBlobParams> {
