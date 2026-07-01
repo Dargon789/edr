@@ -1,7 +1,10 @@
 ---
 name: Custom issue template
-about: Describe this issue template's purpose here.
-title: ""
-labels: ""
-assignees: ""
+about: Open a blank issue for cases not covered by other templates
+title: ''
+labels: ''
+assignees: ''
+
 ---
+
+
