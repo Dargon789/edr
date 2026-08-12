@@ -1,5 +1,5 @@
-import { resetHardhatContext } from "../../src/internal/reset";
-import { HardhatRuntimeEnvironment } from "../../src/types";
+import { resetHardhatContext } from "hardhat/internal/reset";
+import { HardhatRuntimeEnvironment } from "hardhat/types";
 
 declare module "mocha" {
   interface Context {
@@ -12,7 +12,8 @@ export function useEnvironment(configPath?: string) {
     if (configPath !== undefined) {
       process.env.HARDHAT_CONFIG = configPath;
     }
-    this.env = require("../../src/internal/lib/hardhat-lib");
+    // eslint-disable-next-line @typescript-eslint/no-require-imports -- runtime require: must load after HARDHAT_CONFIG is set above
+    this.env = require("hardhat/internal/lib/hardhat-lib");
   });
 
   afterEach("reset hardhat context", function () {

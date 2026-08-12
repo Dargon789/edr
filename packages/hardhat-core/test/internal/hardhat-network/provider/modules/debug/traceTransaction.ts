@@ -236,7 +236,7 @@ describe("Debug module", function () {
         this.skip();
       }
       const forkConfig: ForkConfig = {
-        jsonRpcUrl: ALCHEMY_URL!,
+        jsonRpcUrl: ALCHEMY_URL,
         blockNumber: 11_954_000,
       };
 
@@ -361,7 +361,7 @@ describe("Debug module", function () {
         this.skip();
       }
       const forkConfig: ForkConfig = {
-        jsonRpcUrl: ALCHEMY_URL!,
+        jsonRpcUrl: ALCHEMY_URL,
         blockNumber: 15_204_358,
       };
 

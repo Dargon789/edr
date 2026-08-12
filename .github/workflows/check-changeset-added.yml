@@ -16,6 +16,10 @@ on:
       - labeled
       - unlabeled
 
+# Only reads PR files and labels via the API.
+permissions:
+  pull-requests: read
+
 jobs:
   test:
     name: Test on node ${{ matrix.node_version }} and ${{ matrix.os }}

@@ -1,12 +1,11 @@
 import { assert } from "chai";
 
-import { numberToRpcQuantity } from "../../../../src/internal/core/jsonrpc/types/base-types";
-import { InternalError } from "../../../../src/internal/core/providers/errors";
+import { numberToRpcQuantity } from "hardhat/internal/core/jsonrpc/types/base-types";
+import { InternalError } from "hardhat/internal/core/providers/errors";
 import {
   dateToTimestampSeconds,
   parseDateString,
-} from "../../../../src/internal/util/date";
-import { HardhatNetworkConfig } from "../../../../src/types";
+} from "hardhat/internal/util/date";
 import { useEnvironment } from "../../../helpers/environment";
 import { expectErrorAsync } from "../../../helpers/errors";
 import { useFixtureProject } from "../../../helpers/project";
@@ -72,9 +71,8 @@ describe("Hardhat Network special options", function () {
         ["latest", false]
       );
 
-      const hardhatNetworkConfig = this.env.config.networks
-        .hardhat as HardhatNetworkConfig;
-      const initialDateString = hardhatNetworkConfig.initialDate!;
+      const hardhatNetworkConfig = this.env.config.networks.hardhat;
+      const initialDateString = hardhatNetworkConfig.initialDate;
       const initialDate = dateToTimestampSeconds(
         parseDateString(initialDateString)
       );
@@ -138,8 +136,7 @@ describe("Hardhat Network special options", function () {
         it("Shouldn't work with block numbers from before spurious dragon", async function () {
           await assert.isRejected(
             this.env.network.provider.send("eth_accounts"),
-            InternalError,
-            "Cannot fork mainnet from block"
+            "Cannot fork Mainnet from block"
           );
         });
       });
@@ -172,7 +169,7 @@ describe("Hardhat Network special options", function () {
   });
 
   describe("accounts", function () {
-    describe("mnemonic without passphrase", async function () {
+    describe("mnemonic without passphrase", function () {
       useFixtureProject("mnemonic-without-passphrase");
       useEnvironment();
 
@@ -190,7 +187,7 @@ describe("Hardhat Network special options", function () {
       });
     });
 
-    describe("mnemonic with a passphrase", async function () {
+    describe("mnemonic with a passphrase", function () {
       useFixtureProject("mnemonic-with-passphrase");
       useEnvironment();
 

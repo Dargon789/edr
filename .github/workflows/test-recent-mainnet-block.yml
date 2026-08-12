@@ -2,42 +2,40 @@ name: Run a recent full block in the Hardhat Network
 
 on:
   schedule:
-    - cron: "0 0 * * *"
+    - cron: "0 */8 * * *"
   workflow_dispatch:
 
-defaults:
-  run:
-    working-directory: packages/hardhat-core
+permissions:
+  contents: read
 
 jobs:
   test-recent-mainnet-block:
     name: Test recent mainnet block
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v2
-      - uses: pnpm/action-setup@v2
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          version: 8
-      - uses: actions/setup-node@v4
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust
+
+      - name: Cache EDR RPC cache
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
-          node-version: 16
-          cache: "pnpm"
-      - name: Install
-        run: pnpm install --frozen-lockfile --prefer-offline
-      - name: Build
-        run: pnpm build
-      - name: Run test
-        env:
-          ALCHEMY_URL: ${{ secrets.ALCHEMY_URL }}
-        run: pnpm ts-node scripts/test-recent-mainnet-block.ts
+          path: |
+            **/edr-cache
+          key: test-recent-mainnet-block-rpc-cache-v1
+
+      - run: cargo replay-block -u ${{ secrets.ALCHEMY_URL }} -c l1
+
       - name: Notify failures
         if: failure()
-        uses: slackapi/slack-github-action@v1.18.0
+        uses: slackapi/slack-github-action@0d95c9a7becc1e6e297d76df9bc735c44f4cbcbc # v3.0.5
         with:
+          webhook: ${{ secrets.GH_ACTION_NOTIFICATIONS_SLACK_WEBHOOK_URL }}
+          webhook-type: webhook-trigger
           payload: |
             {
               "workflow_name": "${{ github.workflow }}",
               "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             }
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.GH_ACTION_NOTIFICATIONS_SLACK_WEBHOOK_URL }}

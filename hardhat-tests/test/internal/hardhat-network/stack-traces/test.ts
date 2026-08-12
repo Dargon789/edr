@@ -413,7 +413,7 @@ function compareStackTraces(
 
       assert.isTrue(
         expectedValue === actualValue,
-        `Stack trace of tx ${txIndex} entry ${i} has value ${actualValue!.toString(
+        `Stack trace of tx ${txIndex} entry ${i} has value ${actualValue.toString(
           10
         )} and should have ${expectedValue.toString(10)}`
       );
@@ -433,7 +433,7 @@ function compareStackTraces(
         `Stack trace of tx ${txIndex} entry ${i} should have an errorCode`
       );
 
-      const actualErrorCodeHex = actualErrorCode!.toString(16);
+      const actualErrorCodeHex = actualErrorCode.toString(16);
 
       assert.isTrue(
         expected.errorCode === actualErrorCodeHex,
@@ -477,7 +477,7 @@ function compareStackTraces(
 
         if (optimizer === undefined) {
           assert.equal(
-            actual.sourceReference!.line,
+            actual.sourceReference.line,
             expected.sourceReference.line,
             `Stack trace of tx ${txIndex} entry ${i} have different line numbers`
           );
@@ -625,7 +625,7 @@ async function runTest(
         provider,
 >>>>>>> upstream/main:hardhat-tests/test/internal/hardhat-network/stack-traces/test.ts
         compilerOutput,
-        contract!
+        contract
       );
     }
 
@@ -738,7 +738,7 @@ function linkBytecode(
       for (const ref of references) {
         code = linkHexStringBytecode(
           code,
-          address!.address.toString("hex"),
+          address.address.toString("hex"),
           ref.start
         );
       }
@@ -966,7 +966,7 @@ describe("Stack traces", function () {
 });
 
 describe("Solidity support", function () {
-  it("check that the latest tested version matches the one that EDR exports", async function () {
+  it("check that the latest tested version matches the one that EDR exports", function () {
     const latestSupportedVersion = getLatestTestedSolcVersion();
     const edrLatestSupportedVersion = latestSupportedSolidityVersion();
 
