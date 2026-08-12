@@ -1,3 +1,7 @@
+// The deeply nested async futures in this crate exceed the default
+// layout-computation recursion limit of 128.
+#![recursion_limit = "256"]
+
 /// Types for configuring the provider.
 pub mod config;
 mod console_log;
@@ -33,10 +37,7 @@ use foundry_evm_traces::CallTraceArena;
 use lazy_static::lazy_static;
 
 pub use self::{
-    config::{
-        AccountOverride, Fork as ForkConfig, Interval as IntervalConfig, MemPool as MemPoolConfig,
-        Mining as MiningConfig, Provider as ProviderConfig,
-    },
+    config::AccountOverride,
     data::{CallResult, CallResultWithMetadata, ProviderData},
     debug_trace::DebugTraceError,
     error::{

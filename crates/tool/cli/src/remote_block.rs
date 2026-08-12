@@ -26,6 +26,7 @@ pub async fn replay(
 ) -> anyhow::Result<()> {
     match chain_type {
         SupportedChainTypes::L1 => {
+            // TODO: switch to `amsterdam_header_overrides` once Amsterdam reaches mainnet
             replay_chain_specific_block::<L1ChainSpec>(
                 runtime,
                 edr_chain_l1::CHAIN_TYPE,
@@ -79,5 +80,11 @@ where
     };
 
     println!("Testing block {block_number} for chain type {chain_type}");
-    run_full_block::<ChainSpecT>(runtime, url, block_number, header_overrides_constructor).await
+    run_full_block::<ChainSpecT>(
+        runtime,
+        rpc_client,
+        block_number,
+        header_overrides_constructor,
+    )
+    .await
 }

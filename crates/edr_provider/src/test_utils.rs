@@ -9,6 +9,7 @@ use edr_chain_l1::{
     L1ChainSpec,
 };
 use edr_chain_spec::TransactionValidation;
+use edr_eth::PreEip1898BlockSpec;
 use edr_primitives::{Address, Bytes, HashMap, B256, KECCAK_NULL_RLP, U160, U256};
 use edr_signer::{public_key_to_address, secret_key_from_str, SignatureWithYParity};
 use edr_solidity::contract_decoder::ContractDecoder;
@@ -18,12 +19,12 @@ use parking_lot::RwLock;
 use tokio::runtime;
 
 use crate::{
-    config,
+    config::{ForkConfig, GasEstimationMode, LocalConfig, MiningConfig, ProviderConfig},
     error::ProviderErrorForChainSpec,
     observability::ObservabilityConfig,
     time::{CurrentTime, TimeSinceEpoch},
-    AccountOverride, ForkConfig, MethodInvocation, NoopLogger, Provider, ProviderConfig,
-    ProviderData, ProviderRequest, ProviderSpec, SyncProviderSpec,
+    AccountOverride, MethodInvocation, NoopLogger, Provider, ProviderData, ProviderRequest,
+    ProviderSpec, SyncProviderSpec,
 };
 
 pub const TEST_SECRET_KEY: &str =
@@ -70,6 +71,21 @@ pub fn prague_header_overrides(
         // Prague is not implemented.
         requests_hash: replay_header.requests_hash,
         ..l1_base_header_overrides(replay_header)
+    }
+}
+
+/// Default header overrides for replaying L1 blocks after Amsterdam hardfork.
+pub fn amsterdam_header_overrides(
+    replay_header: &BlockHeader,
+) -> HeaderOverrides<edr_chain_spec::EvmSpecId> {
+    HeaderOverrides {
+        // EDR does not compute the real block access list (EIP-7928), only a simulated hash, so
+        // replay the value from the block being replayed.
+        block_access_list_hash: replay_header.block_access_list_hash,
+        // EDR only simulates the slot number (EIP-7843), so replay the value from the block being
+        // replayed.
+        slot_number: replay_header.slot_number,
+        ..prague_header_overrides(replay_header)
     }
 }
 
@@ -184,28 +200,42 @@ impl<HardforkT> MinimalProviderConfig<HardforkT> {
 pub fn create_test_config_with<HardforkT: Default>(
     config: MinimalProviderConfig<HardforkT>,
 ) -> ProviderConfig<HardforkT> {
+    let network = if let Some(fork_config) = config.fork {
+        fork_config.into()
+    } else {
+        LocalConfig {
+            genesis_blob_gas: Some(BlobGas {
+                gas_used: 0,
+                excess_gas: 0,
+            }),
+            // SAFETY: literal is non-zero
+            genesis_block_gas_limit: unsafe { NonZeroU64::new_unchecked(30_000_000) },
+            genesis_block_time: Some(SystemTime::now()),
+        }
+        .into()
+    };
+
     ProviderConfig {
         allow_blocks_with_same_timestamp: false,
         allow_unlimited_contract_size: false,
         bail_on_call_failure: false,
         bail_on_transaction_failure: false,
         base_fee_params: None,
-        // SAFETY: literal is non-zero
-        block_gas_limit: unsafe { NonZeroU64::new_unchecked(30_000_000) },
+        gas_estimation_mode: GasEstimationMode::TopLevelSuccess,
         chain_id: 123,
         coinbase: Address::from(U160::from(1)),
-        fork: config.fork,
+        // SAFETY: literal is non-zero
+        default_transaction_gas_limit: unsafe { NonZeroU64::new_unchecked(30_000_000) },
         genesis_state: config.genesis_state,
         hardfork: HardforkT::default(),
         initial_base_fee_per_gas: Some(1000000000),
-        initial_blob_gas: Some(BlobGas {
-            gas_used: 0,
-            excess_gas: 0,
-        }),
-        initial_date: Some(SystemTime::now()),
         initial_parent_beacon_block_root: Some(KECCAK_NULL_RLP),
         min_gas_price: 0,
-        mining: config::Mining::default(),
+        mining: MiningConfig {
+            block_gas_limit: Some(unsafe { NonZeroU64::new_unchecked(30_000_000) }),
+            ..MiningConfig::default()
+        },
+        network,
         network_id: 123,
         observability: config.observability.unwrap_or_default(),
         owned_accounts: config.owned_accounts,
@@ -260,6 +290,31 @@ where
     let contract_address = receipt.contract_address.expect("Call must create contract");
 
     Ok(contract_address)
+}
+
+/// Mines an empty block.
+pub fn mine_block<TimerT>(provider: &Provider<L1ChainSpec, TimerT>)
+where
+    TimerT: Clone + TimeSinceEpoch,
+{
+    provider
+        .handle_request(ProviderRequest::with_single(MethodInvocation::EvmMine(
+            None,
+        )))
+        .expect("evm_mine should succeed");
+}
+
+/// Returns the raw JSON of the latest block.
+pub fn get_latest_block<TimerT>(provider: &Provider<L1ChainSpec, TimerT>) -> serde_json::Value
+where
+    TimerT: Clone + TimeSinceEpoch,
+{
+    provider
+        .handle_request(ProviderRequest::with_single(
+            MethodInvocation::GetBlockByNumber(PreEip1898BlockSpec::latest(), false),
+        ))
+        .expect("eth_getBlockByNumber should succeed")
+        .result
 }
 
 /// Fixture for testing `ProviderData`.
@@ -421,4 +476,38 @@ fn genesis_state_with_funded_owned_accounts(
             (address, account_override)
         })
         .collect()
+}
+
+pub fn transfer_value(
+    provider: &Provider<L1ChainSpec>,
+    from: Address,
+    to: Address,
+    value: U256,
+) -> L1RpcTransactionReceipt {
+    let request = TransactionRequest {
+        from,
+        to: Some(to),
+        value: Some(value),
+        ..TransactionRequest::default()
+    };
+
+    let response = provider
+        .handle_request(ProviderRequest::with_single(
+            MethodInvocation::SendTransaction(request),
+        ))
+        .expect("eth_sendTransaction should succeed");
+
+    let transaction_hash: B256 =
+        serde_json::from_value(response.result).expect("response should be a transaction hash");
+
+    let response = provider
+        .handle_request(ProviderRequest::with_single(
+            MethodInvocation::GetTransactionReceipt(transaction_hash),
+        ))
+        .expect("eth_getTransactionReceipt should succeed");
+
+    let receipt: Option<L1RpcTransactionReceipt> =
+        serde_json::from_value(response.result).expect("response should be a receipt");
+
+    receipt.expect("receipt should exist")
 }

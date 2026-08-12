@@ -15,12 +15,18 @@ runs:
   using: composite
   steps:
     - name: Install Rust
-      uses: actions-rust-lang/setup-rust-toolchain@1780873c7b576612439a134613cc4cc74ce5538c # v1.15.2
+      uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
       with:
         # Empty string means rust-toolchain if it exists, otherwise stable
         toolchain: ${{ inputs.toolchain }}
         components: ${{ inputs.components }}
         cache: ${{ inputs.cache }}
+        cache-save-if: ${{ github.ref == 'refs/heads/main' }}
+        # Disabled: caching ~/.cargo/bin/ wholesale clobbers rustup's proxy
+        # binaries on restore after a runner image bump, leaving `cargo` to
+        # behave as `rustup-init` and rejecting every subcommand.
+        # See https://github.com/Swatinem/rust-cache/issues/341
+        cache-bin: "false"
         # Do not override the RUSTFLAGS by default and instead do that per job,
         # if needed. Setting RUSTFLAGS via env var, config, etc. is mutually
         # exclusive and often a source of bugs.
@@ -29,3 +35,21 @@ runs:
         # By default, we do not override the toolchain from rust-toolchain.
         # The user needs to explicitly use `<cmd> +<toolchain>` for clarity.
         override: false
+
+    # Append platform target features to RUSTFLAGS so they survive any env
+    # RUSTFLAGS the job (or cargo-llvm-cov, etc.) sets. Cargo's resolution
+    # rule is "first source wins, no merging" — env RUSTFLAGS clobbers the
+    # `target.<triple>.rustflags` from .cargo/config.toml wholesale, so the
+    # only reliable way to preserve `+crt-static` on Windows test builds
+    # (matching the released NAPI ABI) is to bake it into the env value
+    # itself before any later step appends instrumentation flags.
+    - name: Augment RUSTFLAGS with platform target features
+      shell: bash
+      run:
+        | # zizmor: ignore[github-env] static target-feature flag, not external input
+        case "$RUNNER_OS" in
+          Windows)
+            echo "RUSTFLAGS=${RUSTFLAGS:-} -C target-feature=+crt-static" >> "$GITHUB_ENV"
+            ;;
+          *) ;;
+        esac

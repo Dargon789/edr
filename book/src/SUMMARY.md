@@ -3,7 +3,6 @@
 - [Introduction](./00_introduction.md)
 
 - [Getting Started](./01_getting_started.md)
-
   - [Setup](./01_getting_started/01_setup.md)
   - [Build](./01_getting_started/02_build.md)
   - [Test](./01_getting_started/03_test.md)
@@ -12,7 +11,6 @@
   - [Profiling](./01_getting_started/06_profiling.md)
 
 - [Development](./02_development.md)
-
   - [Tools](./02_development/01_tools.md)
   - [Verdaccio](./02_development/02_verdaccio.md)
   - [Local release](./02_development/03_local_release.md)
@@ -20,13 +18,14 @@
   - [Using pnpm link](./02_development/05_pnpm_link.md)
   - [Style Guide](./02_development/06_style_guide.md)
   - [`pnpm patch` a dependency](./02_development/07_pnpm_patch.md)
-  - [Solidity test cheatcodes](./02_development/08_cheatcodes)
+  - [Solidity test cheatcodes](./02_development/08_cheatcodes.md)
   - [Predeploys](./02_development/09_predeploys.md)
+  - [Dynamic Base Fee Parameters](./02_development/10_dynamic_base_fee_params.md)
+  - [CI Docker image mirror](./02_development/11_ci_docker_mirror.md)
 
 - [Release](./03_release.md)
 
 - [Multi-chain](./04_multichain.md)
-
   - [Chain Specification](./04_multichain/01_chain_spec.md)
 
 - [Contributing](./99_contributing.md)

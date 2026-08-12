@@ -92,6 +92,10 @@ impl<'header, BlockHeaderT: BlockEnvForHardfork<EvmSpecId>> BlockEnvTrait
         self.inner.prevrandao()
     }
 
+    fn slot_num(&self) -> u64 {
+        self.inner.slot_num()
+    }
+
     fn blob_excess_gas_and_price(&self) -> Option<BlobExcessGasAndPrice> {
         self.inner.blob_excess_gas_and_price().or_else(|| {
             // If the hardfork requires it, set ExcessGasAndPrice default value
@@ -125,16 +129,17 @@ impl BlockChainSpec for GenericChainSpec {
     type Block =
         dyn SyncBlock<Arc<Self::Receipt>, Self::SignedTransaction, Error = Self::FetchReceiptError>;
 
-    type BlockBuilder<'builder, BlockchainErrorT: 'builder + std::error::Error> = EthBlockBuilder<
-        'builder,
-        Self::Receipt,
-        Self::Block,
-        BlockchainErrorT,
-        Self,
-        Self::ExecutionReceiptBuilder,
-        Self,
-        Self::LocalBlock,
-    >;
+    type BlockBuilder<'builder, BlockchainErrorT: 'static + std::error::Error + Send + Sync> =
+        EthBlockBuilder<
+            'builder,
+            Self::Receipt,
+            Self::Block,
+            BlockchainErrorT,
+            Self,
+            Self::ExecutionReceiptBuilder,
+            Self,
+            Self::LocalBlock,
+        >;
 
     type FetchReceiptError =
         FetchRemoteReceiptError<<Self::Receipt as TryFrom<Self::RpcReceipt>>::Error>;
@@ -160,6 +165,12 @@ impl EvmChainSpec for GenericChainSpec {
     type PrecompileProvider<BlockT: BlockEnvTrait, DatabaseT: Database> =
         <L1ChainSpec as EvmChainSpec>::PrecompileProvider<BlockT, DatabaseT>;
 
+    fn new_precompile_provider<BlockT: BlockEnvTrait, DatabaseT: Database>(
+        hardfork: Self::Hardfork,
+    ) -> Self::PrecompileProvider<BlockT, DatabaseT> {
+        <L1ChainSpec as EvmChainSpec>::new_precompile_provider::<BlockT, DatabaseT>(hardfork)
+    }
+
     fn dry_run<
         BlockT: BlockEnvTrait,
         DatabaseT: Database,
@@ -180,6 +191,7 @@ impl EvmChainSpec for GenericChainSpec {
             <Self::SignedTransaction as TransactionValidation>::ValidationError,
         >,
     > {
+        let hardfork = cfg.spec;
         let context = Context {
             block,
             tx: transaction,
@@ -190,7 +202,11 @@ impl EvmChainSpec for GenericChainSpec {
             error: Ok(()),
         };
 
-        let mut evm = Evm::new(context, EthInstructions::default(), precompile_provider);
+        let mut evm = Evm::new(
+            context,
+            EthInstructions::new_mainnet_with_spec(hardfork),
+            precompile_provider,
+        );
 
         evm.replay().map_err(TransactionError::from)
     }
@@ -217,6 +233,7 @@ impl EvmChainSpec for GenericChainSpec {
             <Self::SignedTransaction as TransactionValidation>::ValidationError,
         >,
     > {
+        let hardfork = cfg.spec;
         let context = Context {
             block,
             // We need to pass a transaction here to properly initialize the context.
@@ -234,7 +251,7 @@ impl EvmChainSpec for GenericChainSpec {
         let mut evm = Evm::new_with_inspector(
             context,
             inspector,
-            EthInstructions::default(),
+            EthInstructions::new_mainnet_with_spec(hardfork),
             precompile_provider,
         );
 
@@ -361,6 +378,8 @@ mod tests {
             blob_gas,
             parent_beacon_block_root: None,
             requests_hash: Some(B256::random()),
+            block_access_list_hash: None,
+            slot_number: None,
         }
     }
 

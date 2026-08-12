@@ -1,6 +1,7 @@
 use core::{fmt::Debug, marker::PhantomData};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use alloy_trie::root::ordered_trie_root;
 use edr_block_api::Block;
 use edr_block_builder_api::{
     BlockBuilder, BlockBuilderCreationError, BlockFinalizeError, BlockInputs,
@@ -14,8 +15,8 @@ use edr_block_header::{
 };
 use edr_block_local::EthLocalBlock;
 use edr_chain_spec::{
-    BlockEnvChainSpec, BlockEnvConstructor as _, EvmSpecId, ExecutableTransaction,
-    TransactionValidation,
+    BlockEnvChainSpec, BlockEnvConstructor as _, ChainSpec, EvmSpecId, ExecutableTransaction,
+    HardforkChainSpec, TransactionValidation,
 };
 use edr_chain_spec_block::BlockChainSpec;
 use edr_chain_spec_evm::{
@@ -24,15 +25,17 @@ use edr_chain_spec_evm::{
 };
 use edr_chain_spec_receipt::ReceiptConstructor;
 use edr_evm::{dry_run, dry_run_with_inspector};
-use edr_precompile::{OverriddenPrecompileProvider, PrecompileProvider};
-use edr_primitives::{Address, Bloom, HashMap, HashSet, KECCAK_NULL_RLP, U256};
+use edr_precompile::OverriddenPrecompileProvider;
+use edr_primitives::{
+    keccak256, Address, Bloom, HashMap, HashSet, B256, KECCAK_NULL_RLP, KECCAK_RLP_EMPTY_ARRAY,
+    U256,
+};
 use edr_receipt::{
     log::{ExecutionLog, FilterLog},
     ExecutionReceipt, ExecutionReceiptChainSpec, MapReceiptLogs, ReceiptTrait, TransactionReceipt,
 };
 use edr_receipt_builder_api::ExecutionReceiptBuilder;
 use edr_state_api::{AccountModifierFn, DynState, StateDiff, StateError};
-use edr_trie::ordered_trie_root;
 
 const MAX_BLOCK_SIZE: usize = 10_485_760; // 10 MiB
 const SAFETY_MARGIN: usize = 2_097_152; // 2 MiB
@@ -45,7 +48,7 @@ pub struct EthBlockBuilder<
     'builder,
     BlockReceiptT,
     BlockT: ?Sized,
-    BlockchainErrorT: Debug,
+    BlockchainErrorT: Debug + Send + Sync + 'static,
     EvmChainSpecT: EvmChainSpec,
     ExecutionReceiptBuilderT: ExecutionReceiptBuilder<
         EvmChainSpecT::HaltReason,
@@ -80,12 +83,15 @@ pub struct EthBlockBuilder<
     // creation should be deterministic.
     precompile_addresses: HashSet<Address>,
     _phantom: PhantomData<fn() -> (EvmChainSpecT, ExecutionReceiptBuilderT)>,
+    // Net cumulative gas used (after refunds), tracked separately because from Amsterdam
+    // (EIP-7778) the header's `gas_used` is gross (before refunds).
+    cumulative_gas_used: u64,
 }
 
 impl<
         BlockReceiptT,
         BlockT: ?Sized,
-        BlockchainErrorT: Debug,
+        BlockchainErrorT: Debug + Send + Sync + 'static,
         EvmChainSpecT: EvmChainSpec<SignedTransaction: ExecutableTransaction>,
         ExecutionReceiptBuilderT: ExecutionReceiptBuilder<
             EvmChainSpecT::HaltReason,
@@ -150,7 +156,7 @@ impl<
 impl<
         BlockReceiptT,
         BlockT: ?Sized,
-        BlockchainErrorT: Debug,
+        BlockchainErrorT: Debug + Send + Sync + 'static,
         EvmChainSpecT: EvmChainSpec<SignedTransaction: ExecutableTransaction>,
         ExecutionReceiptBuilderT: ExecutionReceiptBuilder<
             EvmChainSpecT::HaltReason,
@@ -183,8 +189,8 @@ impl<
         >,
     > {
         // The transaction's gas limit cannot be greater than the remaining gas in the
-        // block
-        if transaction.gas_limit() > self.gas_remaining() {
+        // block, unless the block gas limit check is disabled.
+        if !self.cfg.disable_block_gas_limit && transaction.gas_limit() > self.gas_remaining() {
             return Err(BlockTransactionError::ExceedsBlockGasLimit);
         }
 
@@ -224,7 +230,7 @@ impl<
                 Hardfork = ChainSpecT::Hardfork,
             > + ReceiptTrait,
         BlockT: ?Sized + Block<ChainSpecT::SignedTransaction>,
-        BlockchainErrorT: Debug + std::error::Error,
+        BlockchainErrorT: Debug + 'static + std::error::Error + Send + Sync,
         ChainSpecT: BlockChainSpec<Hardfork: PartialOrd, SignedTransaction: Clone + ExecutableTransaction>,
         ExecutionReceiptBuilderT: ExecutionReceiptBuilder<
             ChainSpecT::HaltReason,
@@ -318,7 +324,7 @@ impl<
 
         let precompile_addresses = {
             #[allow(clippy::type_complexity)]
-            let mut precompile_provider: OverriddenPrecompileProvider<
+            let precompile_provider: OverriddenPrecompileProvider<
                 _,
                 ContextForChainSpec<
                     ChainSpecT,
@@ -338,10 +344,9 @@ impl<
                     >,
                 >,
             > = OverriddenPrecompileProvider::with_precompiles(
-                ChainSpecT::PrecompileProvider::default(),
+                ChainSpecT::new_precompile_provider(hardfork),
                 custom_precompiles.clone(),
             );
-            precompile_provider.set_spec(hardfork);
             precompile_provider.into_addresses()
         };
 
@@ -361,6 +366,7 @@ impl<
             custom_precompiles,
             precompile_addresses,
             _phantom: PhantomData,
+            cumulative_gas_used: 0,
         })
     }
 
@@ -495,7 +501,9 @@ impl<
 
         self.state.commit(state_diff);
 
-        self.header.gas_used += transaction_result.gas_used();
+        self.cumulative_gas_used += transaction_result.tx_gas_used();
+        self.header.gas_used +=
+            transaction_block_gas_contribution::<ChainSpecT>(self.cfg.spec, &transaction_result);
 
         if let Some(BlobGas { gas_used, .. }) = self.header.blob_gas.as_mut() {
             let blob_gas_used = transaction.total_blob_gas().unwrap_or_default();
@@ -503,10 +511,11 @@ impl<
         }
 
         let receipt = receipt_builder.build_receipt(
-            &self.header,
             &transaction,
             &transaction_result,
             self.cfg.spec,
+            self.cumulative_gas_used,
+            self.header.state_root,
         );
         let receipt = TransactionReceipt::new(
             receipt,
@@ -523,6 +532,22 @@ impl<
     }
 }
 
+/// Gas a transaction contributes to the block's `gas_used`: from Amsterdam
+/// (EIP-7778) the gross gas before refunds, otherwise its net gas used.
+fn transaction_block_gas_contribution<ChainSpecT: ChainSpec + HardforkChainSpec>(
+    hardfork: ChainSpecT::Hardfork,
+    execution_result: &ExecutionResult<ChainSpecT::HaltReason>,
+) -> u64 {
+    if hardfork.into() >= EvmSpecId::AMSTERDAM {
+        let execution_gas = execution_result.gas();
+        execution_gas
+            .total_gas_spent()
+            .max(execution_gas.floor_gas())
+    } else {
+        execution_result.tx_gas_used()
+    }
+}
+
 impl<
         'builder,
         BlockReceiptT: ReceiptConstructor<
@@ -533,7 +558,7 @@ impl<
             > + ReceiptTrait
             + alloy_rlp::Encodable,
         BlockT: ?Sized + Block<ChainSpecT::SignedTransaction>,
-        BlockchainErrorT: Debug + std::error::Error,
+        BlockchainErrorT: Debug + 'static + std::error::Error + Send + Sync,
         ChainSpecT: BlockChainSpec<
             Hardfork: PartialOrd,
             SignedTransaction: Clone + ExecutableTransaction + alloy_rlp::Encodable,
@@ -606,7 +631,7 @@ impl<
             logs_bloom
         };
 
-        self.header.receipts_root = ordered_trie_root(self.receipts.iter().map(alloy_rlp::encode));
+        self.header.receipts_root = ordered_trie_root(&self.receipts);
 
         // Only set the state root if it wasn't specified during construction
         if self.header.state_root == KECCAK_NULL_RLP {
@@ -623,6 +648,14 @@ impl<
                 .expect("Current time must be after unix epoch")
                 .as_secs();
         }
+
+        // Must run after the reward loop and state-root computation above, so
+        // `state_diff` is final.
+        self.header.block_access_list_hash = block_access_list_hash(
+            self.header.block_access_list_hash,
+            &self.state_diff,
+            self.header.parent_hash,
+        );
 
         // TODO: handle ommers
         let block = EthLocalBlock::new::<ExecutionReceiptChainSpecT>(
@@ -665,7 +698,7 @@ impl<
             > + ReceiptTrait
             + alloy_rlp::Encodable,
         BlockT: ?Sized + Block<ChainSpecT::SignedTransaction>,
-        BlockchainErrorT: Debug + std::error::Error,
+        BlockchainErrorT: Debug + 'static + std::error::Error + Send + Sync,
         ChainSpecT: BlockChainSpec
             + BlockEnvChainSpec
             + EvmChainSpec<
@@ -808,5 +841,183 @@ impl<
         BlockFinalizeError<StateError>,
     > {
         self.finalize(rewards)
+    }
+}
+
+/// Resolves a block's simulated block access list hash (EIP-7928), upholding
+/// two guarantees:
+/// - a block that introduces no state changes keeps the empty-RLP-list hash, as
+///   the EIP specifies;
+/// - no two blocks in the same chain share a hash: a state-changing block's
+///   hash is derived from its parent hash, which is unique per block.
+///   (Reverting to a snapshot forks the chain, so the same hash can reoccur on
+///   that fork — but not within a single chain.)
+///
+/// `current` is the value the header already carries (the empty-list default,
+/// or a hash supplied externally); only the empty-list default of a
+/// state-changing block is replaced.
+fn block_access_list_hash(
+    current: Option<B256>,
+    state_diff: &StateDiff,
+    parent_hash: B256,
+) -> Option<B256> {
+    if current == Some(KECCAK_RLP_EMPTY_ARRAY) && !state_diff.as_inner().is_empty() {
+        Some(keccak256(
+            format!("blockAccessListHash{parent_hash}").as_bytes(),
+        ))
+    } else {
+        current
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    mod block_access_list {
+        use edr_state_api::account::AccountInfo;
+
+        use super::*;
+        fn non_empty_state_diff() -> StateDiff {
+            let mut state_diff = StateDiff::default();
+            state_diff.apply_account_change(Address::ZERO, AccountInfo::default());
+            state_diff
+        }
+
+        const PARENT_HASH: B256 = B256::repeat_byte(9);
+
+        #[test]
+        fn keeps_absent_hash() {
+            // A header without the field keeps it absent, whatever the state.
+            assert_eq!(
+                block_access_list_hash(None, &non_empty_state_diff(), PARENT_HASH),
+                None
+            );
+        }
+
+        #[test]
+        fn keeps_empty_list_hash_when_state_unchanged() {
+            assert_eq!(
+                block_access_list_hash(
+                    Some(KECCAK_RLP_EMPTY_ARRAY),
+                    &StateDiff::default(),
+                    PARENT_HASH
+                ),
+                Some(KECCAK_RLP_EMPTY_ARRAY)
+            );
+        }
+
+        #[test]
+        fn keeps_externally_supplied_hash() {
+            let supplied = B256::repeat_byte(0xab);
+            assert_eq!(
+                block_access_list_hash(Some(supplied), &non_empty_state_diff(), PARENT_HASH),
+                Some(supplied)
+            );
+        }
+
+        #[test]
+        fn upgrades_empty_list_hash_when_state_changed() {
+            let hash = block_access_list_hash(
+                Some(KECCAK_RLP_EMPTY_ARRAY),
+                &non_empty_state_diff(),
+                PARENT_HASH,
+            )
+            .expect("should produce a hash");
+
+            // Upgraded away from the empty-list default, and reproducible for the same
+            // inputs.
+            assert_ne!(hash, KECCAK_RLP_EMPTY_ARRAY);
+            assert_eq!(
+                block_access_list_hash(
+                    Some(KECCAK_RLP_EMPTY_ARRAY),
+                    &non_empty_state_diff(),
+                    PARENT_HASH
+                ),
+                Some(hash)
+            );
+        }
+
+        #[test]
+        fn upgraded_hash_varies_with_parent_hash() {
+            // Distinct per block: the parent hash is unique per block within a chain, so no
+            // two sibling blocks share a hash (including in forked mode).
+            assert_ne!(
+                block_access_list_hash(
+                    Some(KECCAK_RLP_EMPTY_ARRAY),
+                    &non_empty_state_diff(),
+                    B256::repeat_byte(2)
+                ),
+                block_access_list_hash(
+                    Some(KECCAK_RLP_EMPTY_ARRAY),
+                    &non_empty_state_diff(),
+                    B256::repeat_byte(3)
+                ),
+            );
+        }
+    }
+
+    mod transaction_block_gas_contribution {
+        use edr_chain_spec_evm::result::{Output, ResultGas, SuccessReason};
+        use edr_primitives::Bytes;
+
+        use super::*;
+        use crate::{HaltReason, Hardfork, L1ChainSpec};
+
+        // A successful result carrying the given raw gas figures.
+        fn execution_result(
+            total_gas_spent: u64,
+            refunded: u64,
+            floor_gas: u64,
+        ) -> ExecutionResult<HaltReason> {
+            ExecutionResult::Success {
+                reason: SuccessReason::Stop,
+                gas: ResultGas::default()
+                    .with_total_gas_spent(total_gas_spent)
+                    .with_refunded(refunded)
+                    .with_floor_gas(floor_gas),
+                logs: Vec::new(),
+                output: Output::Call(Bytes::new()),
+            }
+        }
+
+        #[test]
+        fn before_amsterdam_uses_gas_after_refunds() {
+            // Net gas: total - refund = 40_000, above the (30_000) floor.
+            let result = execution_result(50_000, 10_000, 30_000);
+            assert_eq!(
+                transaction_block_gas_contribution::<L1ChainSpec>(Hardfork::OSAKA, &result),
+                40_000
+            );
+        }
+
+        #[test]
+        fn from_amsterdam_uses_gas_before_refunds() {
+            // EIP-7778: the refund is not subtracted from the block gas.
+            let result = execution_result(50_000, 10_000, 0);
+            assert_eq!(
+                transaction_block_gas_contribution::<L1ChainSpec>(Hardfork::AMSTERDAM, &result),
+                50_000
+            );
+        }
+
+        #[test]
+        fn from_amsterdam_applies_calldata_floor() {
+            // The EIP-7623 floor still applies when it exceeds the gas spent.
+            let result = execution_result(20_000, 0, 25_000);
+            assert_eq!(
+                transaction_block_gas_contribution::<L1ChainSpec>(Hardfork::AMSTERDAM, &result),
+                25_000
+            );
+        }
+
+        #[test]
+        fn before_amsterdam_applies_calldata_floor() {
+            // Net gas is floored too: max(total - refund, floor).
+            let result = execution_result(50_000, 10_000, 45_000);
+            assert_eq!(
+                transaction_block_gas_contribution::<L1ChainSpec>(Hardfork::OSAKA, &result),
+                45_000
+            );
+        }
     }
 }

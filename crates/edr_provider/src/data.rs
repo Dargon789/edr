@@ -11,7 +11,6 @@ use std::{
 };
 
 use alloy_dyn_abi::eip712::TypedData;
-use alloy_eips::eip7825;
 use alloy_rpc_types::EIP1186AccountProofResponse;
 use alloy_rpc_types_trace::geth::GethDebugTracingOptions;
 use edr_block_api::{
@@ -24,7 +23,7 @@ use edr_block_header::{
 };
 use edr_block_miner::{
     mine_block, mine_block_with_single_transaction, MineBlockResultAndStateWithMetadata,
-    MineBlockResultWithMetadata, MineBlockResultWithMetadataForChainSpec,
+    MineBlockResultWithMetadata, MineBlockResultWithMetadataForChainSpec, MineOrdering,
 };
 use edr_blockchain_api::{
     r#dyn::{DynBlockchain, DynBlockchainError},
@@ -38,7 +37,6 @@ use edr_chain_spec::{
 };
 use edr_chain_spec_block::BlockChainSpec;
 use edr_chain_spec_evm::{config::EvmConfig, result::ExecutionResult, CfgEnv};
-use edr_chain_spec_provider::ProviderChainSpec;
 use edr_eip1559::BaseFeeParams;
 use edr_eip7892::ScheduledBlobParams;
 use edr_eth::{
@@ -48,8 +46,8 @@ use edr_eth::{
     reward_percentile::RewardPercentile,
     BlockSpec, BlockTag, Eip1898BlockSpec,
 };
-use edr_evm::guaranteed_dry_run_with_inspector;
-use edr_gas_report::{GasReport, SyncOnCollectedGasReportCallback};
+use edr_evm::{guaranteed_dry_run_with_inspector, ExecutionResultWithMetadata};
+use edr_gas_report::{GasReport, GasReportCreationError, SyncOnCollectedGasReportCallback};
 use edr_mem_pool::{account_next_nonce, MemPool, OrderedTransaction};
 use edr_precompile::PrecompileFn;
 use edr_primitives::{
@@ -69,7 +67,7 @@ use edr_solidity::{config::IncludeTraces, contract_decoder::ContractDecoder};
 use edr_state_api::{
     account::{Account, AccountInfo, AccountStatus},
     irregular::IrregularState,
-    AccountModifierFn, DynState, EvmStorageSlot, StateDiff, StateOverride,
+    AccountModifierFn, DynState, EvmState, EvmStorageSlot, StateDiff, StateOverride,
 };
 use edr_transaction::{
     request::TransactionRequestAndSender, BlockDataForTransaction, IsEip4844, IsSupported as _,
@@ -87,21 +85,26 @@ use rpds::HashTrieMapSync;
 use tokio::runtime;
 
 use crate::{
+    config::{
+        ForkConfig, GasEstimationMode, LocalConfig, MemPoolConfig, MiningConfig, NetworkConfig,
+        ProviderConfig,
+    },
     data::{
         call::BlockEnvWithZeroBaseFee,
-        gas::{
-            compute_rewards, BinarySearchEstimationArgs, CheckGasLimitArgs, CheckGasLimitResult,
-        },
+        gas::{compute_rewards, EstimateGasResult},
     },
     debug_trace::{debug_trace_transaction, DebugTraceResultWithCallTraces},
     error::{
-        CreationError, CreationErrorForChainSpec, EstimateGasFailure, ProviderErrorForChainSpec,
-        TransactionFailure, TransactionFailureWithCallTraces,
+        CreationError, CreationErrorForChainSpec, ProviderErrorForChainSpec, TransactionFailure,
+        TransactionFailureWithCallTraces,
     },
     filter::{bloom_contains_log_filter, filter_logs, Filter, FilterData, LogFilter},
     logger::SyncLogger,
     mock::SyncCallOverride,
-    observability::{EvmObservedData, EvmObserver, EvmObserverConfig, ObservabilityConfig},
+    observability::{
+        observe_execution, EvmObservedData, EvmObserver, EvmObserverConfig, ObservabilityConfig,
+        ObservedExecution,
+    },
     pending::BlockchainWithPending,
     requests::hardhat::rpc_types::ForkMetadata,
     snapshot::Snapshot,
@@ -110,8 +113,8 @@ use crate::{
         SyncBlockchainForChainSpec, SyncProviderSpec, TransactionAndBlockForChainSpec,
     },
     time::{CurrentTime, TimeSinceEpoch},
-    DebugTraceError, ForkConfig, MiningConfig, ProviderConfig, ProviderError, SubscriptionEvent,
-    SubscriptionEventData, SyncSubscriberCallback,
+    DebugTraceError, ProviderError, SubscriptionEvent, SubscriptionEventData,
+    SyncSubscriberCallback,
 };
 
 const DEFAULT_INITIAL_BASE_FEE_PER_GAS: u128 = 1_000_000_000;
@@ -142,22 +145,33 @@ impl<HaltReasonT: HaltReasonTrait> CallResultWithMetadata<HaltReasonT> {
     /// Converts into a [`CallResult`], discarding metadata.
     pub fn into_call_result(self, include_traces: IncludeTraces) -> CallResult<HaltReasonT> {
         CallResult {
-            call_trace_arena: if include_traces
+            call_trace_arena: include_traces
                 .should_include(|| !self.execution_result.is_success())
-            {
-                Some(self.call_trace_arena)
-            } else {
-                None
-            },
+                .then_some(self.call_trace_arena),
             execution_result: self.execution_result,
         }
     }
+
+    /// Returns the call traces if they should be included, consuming `self`.
+    pub fn into_call_traces(self, include_traces: IncludeTraces) -> Option<CallTraceArena> {
+        include_traces
+            .should_include(|| !self.execution_result.is_success())
+            .then_some(self.call_trace_arena)
+    }
 }
 
-#[derive(Clone)]
-pub struct EstimateGasResult {
-    pub call_trace_arenas: Vec<CallTraceArena>,
-    pub estimation: u64,
+impl<HaltReasonT: HaltReasonTrait> From<ObservedExecution<ExecutionResultWithMetadata<HaltReasonT>>>
+    for CallResultWithMetadata<HaltReasonT>
+{
+    fn from(value: ObservedExecution<ExecutionResultWithMetadata<HaltReasonT>>) -> Self {
+        Self {
+            address_to_executed_code: value.evm_observed_data.address_to_executed_code,
+            call_trace_arena: value.evm_observed_data.call_trace_arena,
+            console_log_inputs: value.evm_observed_data.encoded_console_logs,
+            execution_result: value.execution_result.result,
+            precompile_addresses: value.execution_result.precompile_addresses,
+        }
+    }
 }
 
 /// Helper type for a chain-specific [`SendTransactionResult`].
@@ -194,11 +208,8 @@ impl<BlockT, HaltReasonT: HaltReasonTrait, SignedTransactionT>
                     .into_iter()
                     .zip(result.transaction_results)
                     .filter_map(|(observed_data, transaction_result)| {
-                        if include_call_traces.should_include(|| !transaction_result.is_success()) {
-                            Some(observed_data.call_trace_arena)
-                        } else {
-                            None
-                        }
+                        observed_data
+                            .into_call_traces(include_call_traces, transaction_result.is_success())
                     })
             })
             .collect();
@@ -249,15 +260,18 @@ pub struct ProviderData<
     bail_on_call_failure: bool,
     /// Whether to return an `Err` when a `eth_sendTransaction` fails
     bail_on_transaction_failure: bool,
+    beneficiary: Address,
     blockchain: Box<dyn SyncBlockchainForChainSpec<ChainSpecT>>,
     block_config: BlockConfig<ChainSpecT::Hardfork>,
+    default_transaction_gas_limit: NonZeroU64,
+    gas_estimation_mode: GasEstimationMode,
+    is_auto_mining: bool,
     pub irregular_state: IrregularState,
     mem_pool: MemPool<ChainSpecT::SignedTransaction>,
-    mining_config: MiningConfig,
+    mining_order: MineOrdering,
     network_id: u64,
     observability: ObservabilityConfig,
     precompile_overrides: HashMap<Address, PrecompileFn>,
-    beneficiary: Address,
     min_gas_price: u128,
     parent_beacon_block_root_generator: RandomHashGenerator,
     prev_randao_generator: RandomHashGenerator,
@@ -267,7 +281,6 @@ pub struct ProviderData<
     // Hack to get around the type erasure with the dyn blockchain trait.
     rpc_client: Option<Arc<EthRpcClientForChainSpec<ChainSpecT>>>,
     instance_id: B256,
-    is_auto_mining: bool,
     next_block_base_fee_per_gas: Option<u128>,
     base_fee_params: Option<BaseFeeParams<ChainSpecT::Hardfork>>,
     next_block_timestamp: Option<u64>,
@@ -327,11 +340,6 @@ where
         self.bail_on_transaction_failure
     }
 
-    /// Retrieves the gas limit of the next block.
-    pub fn block_gas_limit(&self) -> u64 {
-        self.mem_pool.block_gas_limit().get()
-    }
-
     pub fn coinbase(&self) -> Address {
         self.beneficiary
     }
@@ -348,6 +356,11 @@ where
             .next()
             .copied()
             .unwrap_or(Address::ZERO)
+    }
+
+    /// Returns the default transaction gas limit.
+    pub fn default_transaction_gas_limit(&self) -> u64 {
+        self.default_transaction_gas_limit.get()
     }
 
     /// Returns the metadata of the forked blockchain, if it exists.
@@ -383,11 +396,6 @@ where
 
     pub fn logger_mut(&mut self) -> &mut dyn SyncLogger<ChainSpecT, TimerT> {
         &mut *self.logger
-    }
-
-    /// Returns the instance's [`MiningConfig`].
-    pub fn mining_config(&self) -> &MiningConfig {
-        &self.mining_config
     }
 
     /// Returns the instance's network ID.
@@ -699,15 +707,44 @@ where
         block_state_cache.push(current_state_id, Arc::new(state));
         block_number_to_state_id.insert_mut(blockchain.last_block_number(), current_state_id);
 
-        let allow_blocks_with_same_timestamp = config.allow_blocks_with_same_timestamp;
-        let allow_unlimited_contract_size = config.allow_unlimited_contract_size;
-        let beneficiary = config.coinbase;
-        let block_gas_limit = config.block_gas_limit;
-        let is_auto_mining = config.mining.auto_mine;
-        let min_gas_price = config.min_gas_price;
+        let ProviderConfig {
+            allow_blocks_with_same_timestamp,
+            allow_unlimited_contract_size,
+            bail_on_call_failure,
+            bail_on_transaction_failure,
+            base_fee_params,
+            // Used by `create_blockchain_and_state`
+            chain_id: _chain_id,
+            coinbase: beneficiary,
+            default_transaction_gas_limit,
+            gas_estimation_mode,
+            // Used by `create_blockchain_and_state`
+            genesis_state: _genesis_state,
+            // Used by `create_blockchain_and_state`
+            hardfork: _hardfork,
+            // Used by `create_blockchain_and_state`
+            initial_base_fee_per_gas: _initial_base_fee_per_gas,
+            initial_parent_beacon_block_root,
+            mining:
+                MiningConfig {
+                    auto_mine: is_auto_mining,
+                    block_gas_limit,
+                    interval: _interval,
+                    mem_pool:
+                        MemPoolConfig {
+                            order: mining_order,
+                        },
+                },
+            min_gas_price,
+            network: _network,
+            network_id,
+            observability,
+            owned_accounts,
+            precompile_overrides,
+            transaction_gas_cap,
+        } = config;
 
-        let local_accounts = config
-            .owned_accounts
+        let local_accounts = owned_accounts
             .iter()
             .map(|secret_key| {
                 let address = public_key_to_address(secret_key.public_key());
@@ -716,40 +753,32 @@ where
             })
             .collect();
 
-        let observability = config.observability.clone();
-
         let skip_unsupported_transaction_types = get_skip_unsupported_transaction_types_from_env();
 
-        let parent_beacon_block_root_generator = if let Some(initial_parent_beacon_block_root) =
-            &config.initial_parent_beacon_block_root
-        {
-            RandomHashGenerator::with_value(*initial_parent_beacon_block_root)
-        } else {
-            RandomHashGenerator::with_seed("randomParentBeaconBlockRootSeed")
-        };
-
-        let transaction_gas_cap = if let Some(cap) = config.transaction_gas_cap {
-            Some(cap)
-        } else if config.hardfork.into() >= EvmSpecId::OSAKA {
-            Some(eip7825::MAX_TX_GAS_LIMIT_OSAKA)
-        } else {
-            None
-        };
+        let parent_beacon_block_root_generator =
+            if let Some(initial_parent_beacon_block_root) = initial_parent_beacon_block_root {
+                RandomHashGenerator::with_value(initial_parent_beacon_block_root)
+            } else {
+                RandomHashGenerator::with_seed("randomParentBeaconBlockRootSeed")
+            };
 
         Ok(Self {
             runtime_handle,
-            bail_on_call_failure: config.bail_on_call_failure,
-            bail_on_transaction_failure: config.bail_on_transaction_failure,
-            base_fee_params: config.base_fee_params,
+            bail_on_call_failure,
+            bail_on_transaction_failure,
+            base_fee_params,
+            beneficiary,
             blockchain,
             block_config,
+            default_transaction_gas_limit,
+            gas_estimation_mode,
+            is_auto_mining,
             irregular_state,
             mem_pool: MemPool::new(block_gas_limit, transaction_gas_cap),
-            mining_config: config.mining,
-            network_id: config.network_id,
+            mining_order,
+            network_id,
             observability,
-            precompile_overrides: config.precompile_overrides,
-            beneficiary,
+            precompile_overrides,
             min_gas_price,
             parent_beacon_block_root_generator,
             prev_randao_generator,
@@ -757,7 +786,6 @@ where
             fork_metadata,
             rpc_client,
             instance_id: B256::random(),
-            is_auto_mining,
             next_block_base_fee_per_gas,
             next_block_timestamp: None,
             // Start with 1 to mimic Ganache
@@ -1016,7 +1044,7 @@ where
     ) -> Result<(), ProviderErrorForChainSpec<ChainSpecT>> {
         let state = self.current_state()?;
         self.mem_pool
-            .set_block_gas_limit(&*state, gas_limit)
+            .set_block_gas_limit(&*state, Some(gas_limit))
             .map_err(ProviderError::State)
     }
 
@@ -1173,9 +1201,11 @@ where
     ) -> Result<ChainSpecT::SignedTransaction, ProviderErrorForChainSpec<ChainSpecT>> {
         let TransactionRequestAndSender { request, sender } = transaction_request;
 
+        let transaction_gas_cap = self.mem_pool.transaction_gas_cap().unwrap_or(u64::MAX);
+
         if self.impersonated_accounts.contains(&sender) {
             let signed_transaction = request.fake_sign(sender);
-            transaction::validate(signed_transaction, self.evm_spec_id())
+            transaction::validate(signed_transaction, self.evm_spec_id(), transaction_gas_cap)
                 .map_err(ProviderError::TransactionCreationError)
         } else {
             let secret_key = self
@@ -1188,7 +1218,7 @@ where
             let signed_transaction =
                 unsafe { request.sign_for_sender_unchecked(secret_key, sender) }?;
 
-            transaction::validate(signed_transaction, self.evm_spec_id())
+            transaction::validate(signed_transaction, self.evm_spec_id(), transaction_gas_cap)
                 .map_err(ProviderError::TransactionCreationError)
         }
     }
@@ -1314,13 +1344,16 @@ where
     fn create_evm_config(&self, chain_id: u64) -> EvmConfig {
         EvmConfig {
             chain_id,
+            disable_block_gas_limit: self.mem_pool.block_gas_limit().is_none(),
             disable_eip3607: true,
             limit_contract_code_size: if self.allow_unlimited_contract_size {
                 Some(usize::MAX)
             } else {
                 None
             },
-            transaction_gas_cap: self.mem_pool.transaction_gas_cap(),
+            // We set the transaction gas cap to `u64::MAX` as it's REVM's way of circumventing the
+            // gas limit check at the transaction level.
+            transaction_gas_cap: Some(self.mem_pool.transaction_gas_cap().unwrap_or(u64::MAX)),
         }
     }
 
@@ -1505,7 +1538,9 @@ where
     > {
         options.base_fee = options.base_fee.or(self.next_block_base_fee_per_gas);
         options.beneficiary = Some(options.beneficiary.unwrap_or(self.beneficiary));
-        options.gas_limit = Some(options.gas_limit.unwrap_or_else(|| self.block_gas_limit()));
+        options.gas_limit = options
+            .gas_limit
+            .or_else(|| self.mem_pool.block_gas_limit().map(NonZeroU64::get));
 
         let evm_config = self.create_evm_config(self.blockchain.chain_id());
 
@@ -1531,20 +1566,25 @@ where
             let mut contract_decoder = self.contract_decoder.write();
 
             let mut report = GasReport::default();
-            for (transaction, execution_result) in result
-                .block_and_state
-                .block
-                .transactions()
-                .iter()
-                .zip(result.block_and_state.transaction_results.iter())
-            {
-                report.add(
-                    &result.block_and_state.state,
+            for (transaction, execution_result, inspector_data) in izip!(
+                result.block_and_state.block.transactions().iter(),
+                result.block_and_state.transaction_results.iter(),
+                result.transaction_inspector_data.iter()
+            ) {
+                match report.add(
                     &mut contract_decoder,
                     execution_result,
                     transaction.kind(),
                     transaction.data().clone(),
-                )?;
+                    &inspector_data.call_trace_arena,
+                    &inspector_data.address_to_executed_code,
+                ) {
+                    Ok(()) => (),
+                    Err(GasReportCreationError::MissingCode { address }) =>
+                        unreachable!(
+                        "The code for all executed addresses should be available, as we pass the executed code to the contract decoder. Missing code: {address}"
+                    ),
+                };
             }
 
             callback(report).map_err(ProviderError::OnCollectedGasReportCallback)?;
@@ -1822,14 +1862,13 @@ where
             .map_err(DebugTraceError::from_debug_inspector_creation_error)?;
 
         // Disable call overrides for `debug_traceCall`
-        let mut evm_observer = EvmObserver::new(EvmObserverConfig {
+        let observer_config = EvmObserverConfig {
             call_override: None,
             ..EvmObserverConfig::new(&self.observability, self.contract_decoder.clone())
-        });
+        };
 
         let custom_precompiles = self.precompile_overrides.clone();
 
-        let include_call_traces = self.observability.include_call_traces;
         let scheduled_blob_params = self.scheduled_blob_params().cloned();
         self.execute_in_block_context(Some(block_spec), move |blockchain, block, state| {
             let block_env = BlockEnvWithZeroBaseFee::new(ChainSpecT::BlockEnv::new_block_env(
@@ -1838,47 +1877,40 @@ where
                 scheduled_blob_params.as_ref(),
             ));
 
-            let result = guaranteed_dry_run_with_inspector::<ChainSpecT, _, _, _, _>(
-                blockchain,
-                state.as_ref(),
-                cfg_env,
-                transaction.clone(),
-                &block_env,
-                &custom_precompiles,
-                &mut DualInspector::new(&mut debug_inspector, &mut evm_observer),
-            )?;
-
-            let EvmObservedData {
-                address_to_executed_code: _,
-                call_trace_arena,
-                encoded_console_logs: _,
-            } = evm_observer.collect_and_report(&result.precompile_addresses)?;
+            let observed_execution = observe_execution(&observer_config, |observer| {
+                guaranteed_dry_run_with_inspector::<ChainSpecT, _, _, _, _>(
+                    blockchain,
+                    state.as_ref(),
+                    cfg_env,
+                    transaction.clone(),
+                    &block_env,
+                    &custom_precompiles,
+                    &mut DualInspector::new(&mut debug_inspector, observer),
+                )
+                .map_err(ProviderError::RunTransaction)
+            })?;
 
             let mut database = WrapDatabaseRef(DatabaseComponents {
                 blockchain,
                 state: state.as_ref(),
             });
 
-            let call_trace_arenas =
-                if include_call_traces.should_include(|| !result.result.is_success()) {
-                    vec![call_trace_arena]
-                } else {
-                    Vec::new()
-                };
+            let (execution_result, call_trace_arena) =
+                observed_execution.into_result_and_filtered_traces();
 
             let geth_trace = debug_inspector
                 .get_result(
                     None,
                     &transaction,
                     &block_env,
-                    &result.into_result_and_state(),
+                    &execution_result.into_result_and_state(),
                     &mut database,
                 )
                 .map_err(DebugTraceError::from_debug_inspector_result_error)?;
 
             Ok(DebugTraceResultWithCallTraces {
                 result: geth_trace,
-                call_trace_arenas,
+                call_trace_arenas: call_trace_arena.into_iter().collect(),
             })
         })?
     }
@@ -2288,15 +2320,10 @@ where
             return Err(ProviderError::TransactionFailed(Box::new(
                 TransactionFailureWithCallTraces {
                     failure,
-                    call_trace_arenas: if self
-                        .observability
-                        .include_call_traces
-                        .should_include(|| !call_result.execution_result.is_success())
-                    {
-                        vec![call_result.call_trace_arena]
-                    } else {
-                        Vec::new()
-                    },
+                    call_trace_arenas: call_result
+                        .into_call_traces(self.observability.include_call_traces)
+                        .into_iter()
+                        .collect(),
                 },
             )));
         }
@@ -2320,10 +2347,8 @@ where
         let cfg_env = self.create_evm_config_at_block_spec(block_spec)?;
 
         let custom_precompiles = self.precompile_overrides.clone();
-        let mut evm_observer = EvmObserver::new(EvmObserverConfig::new(
-            &self.observability,
-            self.contract_decoder.clone(),
-        ));
+        let observer_config =
+            EvmObserverConfig::new(&self.observability, self.contract_decoder.clone());
 
         let gas_report_args =
             self.observability
@@ -2341,26 +2366,22 @@ where
         self.execute_in_block_context(Some(block_spec), |blockchain, block, state| {
             let state_overrider = StateRefOverrider::new(state_overrides, state.as_ref());
 
-            let block_env = ChainSpecT::BlockEnv::new_block_env(
-                block.block_header(),
-                cfg_env.spec,
-                scheduled_blob_params.as_ref(),
-            );
-            let execution_result = call::run_call::<ChainSpecT, _, _, _>(
-                blockchain,
-                block_env,
-                state_overrider,
-                cfg_env,
-                transaction.clone(),
-                &custom_precompiles,
-                &mut evm_observer,
-            )?;
-
-            let EvmObservedData {
-                address_to_executed_code,
-                call_trace_arena,
-                encoded_console_logs,
-            } = evm_observer.collect_and_report(&execution_result.precompile_addresses)?;
+            let observed_execution = observe_execution(&observer_config, |observer|  {
+                let block_env = ChainSpecT::BlockEnv::new_block_env(
+                    block.block_header(),
+                    cfg_env.spec,
+                    scheduled_blob_params.as_ref(),
+                );
+                call::run_call::<ChainSpecT, _, _, _>(
+                    blockchain,
+                    block_env,
+                    state_overrider,
+                    cfg_env,
+                    transaction.clone(),
+                        &custom_precompiles,
+                    observer,
+                )
+            })?;
 
             if let Some(GasReportArgs {
                 callback,
@@ -2369,24 +2390,24 @@ where
             }) = gas_report_args
             {
                 let mut contract_decoder = contract_decoder.write();
-                let gas_report = GasReport::new(
-                    state,
+                let gas_report = match GasReport::new(
                     &mut contract_decoder,
-                    &execution_result.result,
+                    observed_execution.result(),
                     kind,
-                    input,
-                )?;
+                    input.clone(),
+                    &observed_execution.evm_observed_data.call_trace_arena,
+                    &observed_execution.evm_observed_data.address_to_executed_code,
+                ) {
+                    Ok(report) => report,
+                    Err(GasReportCreationError::MissingCode { address }) => unreachable!(
+                        "The code for all executed addresses should be available, as we pass the executed code to the contract decoder. Missing code: {address}"
+                    ),
+                };
 
                 callback(gas_report).map_err(ProviderError::OnCollectedGasReportCallback)?;
             }
 
-            Ok(CallResultWithMetadata {
-                address_to_executed_code,
-                call_trace_arena,
-                console_log_inputs: encoded_console_logs,
-                execution_result: execution_result.result,
-                precompile_addresses: execution_result.precompile_addresses,
-            })
+            Ok(observed_execution.into())
         })?
     }
 
@@ -2449,7 +2470,7 @@ where
             evm_config,
             options,
             self.min_gas_price,
-            self.mining_config.mem_pool.order,
+            self.mining_order,
             reward,
             Some(evm_observer),
             &self.precompile_overrides,
@@ -2514,7 +2535,7 @@ where
     ) -> Result<SendTransactionResultForChainSpec<ChainSpecT>, ProviderErrorForChainSpec<ChainSpecT>>
     {
         if transaction.transaction_type().is_eip4844() {
-            if !self.is_auto_mining || edr_mem_pool::has_transactions(&self.mem_pool) {
+            if !self.is_auto_mining() || edr_mem_pool::has_transactions(&self.mem_pool) {
                 return Err(ProviderError::BlobMemPoolUnsupported);
             }
 
@@ -2542,7 +2563,7 @@ where
             });
         }
 
-        let snapshot_id = if self.is_auto_mining {
+        let snapshot_id = if self.is_auto_mining() {
             // This check guarantees that the sent transaction is a pending transaction,
             // meaning it can either be mined immediately or as part of a sequence of
             // transactions.
@@ -2735,145 +2756,33 @@ where
         // a block
         let minimum_cost =
             transaction::calculate_initial_tx_gas_for_tx(&transaction, self.evm_spec_id())
-                .initial_gas;
+                .initial_total_gas;
 
         let custom_precompiles = self.precompile_overrides.clone();
         let observer_config =
             EvmObserverConfig::new(&self.observability, self.contract_decoder.clone());
 
-        let mut evm_observer = EvmObserver::new(observer_config.clone());
         let contract_decoder = Arc::clone(&self.contract_decoder);
         let scheduled_blob_params = self.scheduled_blob_params().cloned();
-
-        let include_call_traces = self.observability.include_call_traces;
+        let estimation_mode = self.gas_estimation_mode;
 
         self.execute_in_block_context(Some(block_spec), |blockchain, block, state| {
-            let header = block.block_header();
-
-            // Measure the gas used by the transaction with optional limit from call request
-            // defaulting to block limit. Report errors from initial call as if from
-            // `eth_call`.
-            let block_env = ChainSpecT::BlockEnv::new_block_env(
-                block.block_header(),
-                cfg_env.spec,
-                scheduled_blob_params.as_ref(),
-            );
-            let result = call::run_call::<'_, ChainSpecT, _, _, _>(
+            let context = gas::GasCallContext {
                 blockchain,
-                block_env,
-                state,
-                cfg_env.clone(),
-                transaction.clone(),
-                &custom_precompiles,
-                &mut evm_observer,
-            )?;
-
-            let EvmObservedData {
-                address_to_executed_code,
-                call_trace_arena,
-                encoded_console_logs,
-            } = evm_observer.collect_and_report(&result.precompile_addresses)?;
-
-            let mut initial_estimation = match result.result {
-                ExecutionResult::Success { gas_used, .. } => Ok(gas_used),
-                ExecutionResult::Revert { output, .. } => Err(TransactionFailure::revert(
-                    output,
-                    None,
-                    &address_to_executed_code,
-                    &call_trace_arena,
-                    contract_decoder.as_ref(),
-                )),
-                ExecutionResult::Halt { reason, .. } => Err(TransactionFailure::halt(
-                    ChainSpecT::cast_halt_reason(reason),
-                    None,
-                    &address_to_executed_code,
-                    &call_trace_arena,
-                    contract_decoder.as_ref(),
-                )),
-            }
-            .map_err(|transaction_failure| {
-                Box::new(EstimateGasFailure {
-                    address_to_executed_code,
-                    call_trace_arena: call_trace_arena.clone(),
-                    encoded_console_logs,
-                    precompile_addresses: result.precompile_addresses,
-                    transaction_failure,
-                })
-            })?;
-
-            let mut call_trace_arenas = if include_call_traces == IncludeTraces::All {
-                vec![call_trace_arena]
-            } else {
-                Vec::new()
-            };
-
-            // Ensure that the initial estimation is at least the minimum cost + 1.
-            if initial_estimation <= minimum_cost {
-                initial_estimation = minimum_cost + 1;
-            }
-
-            // Create a new observer for the check
-            let mut evm_observer = EvmObserver::new(observer_config.clone());
-
-            // Test if the transaction would be successful with the initial estimation
-            let CheckGasLimitResult {
-                success,
-                precompile_addresses,
-            } = gas::check_gas_limit::<ChainSpecT>(CheckGasLimitArgs {
-                blockchain,
-                header,
-                state,
-                cfg_env: cfg_env.clone(),
-                transaction: transaction.clone(),
-                gas_limit: initial_estimation,
+                cfg_env,
                 custom_precompiles: &custom_precompiles,
-                observer: &mut evm_observer,
+                header: block.block_header(),
                 scheduled_blob_params: scheduled_blob_params.as_ref(),
-            })?;
-
-            let EvmObservedData {
-                address_to_executed_code: _,
-                call_trace_arena,
-                encoded_console_logs: _,
-            } = evm_observer.collect_and_report(&precompile_addresses)?;
-
-            if include_call_traces.should_include(|| !success) {
-                call_trace_arenas.push(call_trace_arena);
-            }
-
-            // Return the initial estimation if it was successful
-            if success {
-                return Ok(EstimateGasResult {
-                    estimation: initial_estimation,
-                    call_trace_arenas,
-                });
-            }
-
-            // Correct the initial estimation if the transaction failed with the actually
-            // used gas limit. This can happen if the execution logic is based
-            // on the available gas.
-            let EstimateGasResult {
-                call_trace_arenas: estimation_call_trace_arenas,
-                estimation,
-            } = gas::binary_search_estimation::<ChainSpecT>(BinarySearchEstimationArgs {
-                blockchain,
-                header,
                 state,
-                cfg_env: cfg_env.clone(),
                 transaction,
-                lower_bound: initial_estimation,
-                upper_bound: header.gas_limit,
-                custom_precompiles: &custom_precompiles,
-                observer_config,
-                scheduled_blob_params: scheduled_blob_params.as_ref(),
-            })?;
-
-            call_trace_arenas.extend(estimation_call_trace_arenas);
-
-            Ok(EstimateGasResult {
-                call_trace_arenas,
-                estimation,
-            })
+            };
+            gas::estimate_gas::<TimerT, ChainSpecT>(
+                &context,
+                contract_decoder,
+                minimum_cost,
+                &observer_config,
+                estimation_mode,
+            )
         })?
     }
 }
@@ -2888,26 +2797,6 @@ impl StateId {
         self.0 += 1;
         *self
     }
-}
-
-fn block_time_offset_seconds<ChainSpecT: ProviderChainSpec, TimerT: TimeSinceEpoch>(
-    config: &ProviderConfig<ChainSpecT::Hardfork>,
-    timer: &TimerT,
-) -> Result<i64, CreationErrorForChainSpec<ChainSpecT>> {
-    config.initial_date.map_or(Ok(0), |initial_date| {
-        let initial_timestamp = i64::try_from(
-            initial_date
-                .duration_since(UNIX_EPOCH)
-                .map_err(|_e| CreationError::InvalidInitialDate(initial_date))?
-                .as_secs(),
-        )
-        .expect("initial date must be representable as i64");
-
-        let current_timestamp = i64::try_from(timer.since_epoch())
-            .expect("Current timestamp must be representable as i64");
-
-        Ok(initial_timestamp - current_timestamp)
-    })
 }
 
 struct BlockchainAndState<ChainSpecT: BlockChainSpec> {
@@ -3018,7 +2907,7 @@ fn create_forked_blockchain_and_state<
             ))
         })?;
 
-        let genesis_state: HashMap<Address, Account> = config
+        let genesis_state: EvmState = config
             .genesis_state
             .iter()
             .zip(genesis_account_infos)
@@ -3036,6 +2925,7 @@ fn create_forked_blockchain_and_state<
                     nonce: account_override.nonce.unwrap_or(remote_account.nonce),
                     code_hash,
                     code,
+                    account_id: None,
                 };
 
                 // TODO: Add support for overriding the storage
@@ -3045,6 +2935,7 @@ fn create_forked_blockchain_and_state<
                 }
 
                 let account = Account {
+                    original_info: Box::new(info.clone()),
                     info,
                     // TODO: Add support for overriding the storage
                     // TODO: https://github.com/NomicFoundation/edr/issues/911
@@ -3145,6 +3036,7 @@ fn create_local_blockchain_and_state<
 >(
     config: &ProviderConfig<ChainSpecT::Hardfork>,
     timer: &TimerT,
+    local_config: &LocalConfig,
 ) -> Result<BlockchainAndState<ChainSpecT>, CreationErrorForChainSpec<ChainSpecT>> {
     let mut prev_randao_generator = RandomHashGenerator::with_seed(edr_defaults::MIX_HASH_SEED);
     let mix_hash = if config.hardfork.into() >= EvmSpecId::MERGE {
@@ -3153,7 +3045,7 @@ fn create_local_blockchain_and_state<
         None
     };
 
-    let genesis_state: HashMap<Address, Account> = config
+    let genesis_state: EvmState = config
         .genesis_state
         .iter()
         .map(|(address, account_override)| {
@@ -3167,9 +3059,11 @@ fn create_local_blockchain_and_state<
                 nonce: account_override.nonce.unwrap_or(0),
                 code_hash,
                 code: account_override.code.clone(),
+                account_id: None,
             };
 
             let account = Account {
+                original_info: Box::new(info.clone()),
                 info,
                 storage: account_override
                     .storage
@@ -3203,22 +3097,29 @@ fn create_local_blockchain_and_state<
     };
 
     let genesis_diff = StateDiff::from(genesis_state);
+    let genesis_timestamp = if let Some(initial_time) = local_config.genesis_block_time {
+        Some(
+            initial_time
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_error| CreationError::InvalidInitialDate(initial_time))?
+                .as_secs(),
+        )
+    } else {
+        None
+    };
+
     let genesis_block = ChainSpecT::genesis_block(
         genesis_diff.clone(),
         &block_config,
         GenesisBlockOptions {
             extra_data: None,
             withdrawals_root: None,
-            gas_limit: Some(config.block_gas_limit.get()),
-            timestamp: config.initial_date.map(|d| {
-                d.duration_since(UNIX_EPOCH)
-                    .expect("initial date must be after UNIX epoch")
-                    .as_secs()
-            }),
+            gas_limit: Some(local_config.genesis_block_gas_limit.get()),
+            timestamp: genesis_timestamp,
             mix_hash,
             base_fee: config.initial_base_fee_per_gas,
             base_fee_params: config.base_fee_params.clone(),
-            blob_gas: config.initial_blob_gas.clone(),
+            blob_gas: local_config.genesis_blob_gas.clone(),
         },
     )
     .map_err(CreationError::LocalBlockchainCreation)?;
@@ -3236,7 +3137,15 @@ fn create_local_blockchain_and_state<
         .state_at_block_number(0, irregular_state.state_overrides())
         .expect("Genesis state must exist");
 
-    let block_time_offset_seconds = block_time_offset_seconds::<ChainSpecT, TimerT>(config, timer)?;
+    let block_time_offset_seconds = genesis_timestamp.map_or(0i64, |genesis_timestamp| {
+        let genesis_timestamp = i64::try_from(genesis_timestamp)
+            .expect("genesis timestamp must be representable as i64");
+
+        let current_timestamp = i64::try_from(timer.since_epoch())
+            .expect("Current timestamp must be representable as i64");
+
+        genesis_timestamp - current_timestamp
+    });
 
     Ok(BlockchainAndState {
         fork_metadata: None,
@@ -3261,10 +3170,13 @@ fn create_blockchain_and_state<
     config: &ProviderConfig<ChainSpecT::Hardfork>,
     timer: &TimerT,
 ) -> Result<BlockchainAndState<ChainSpecT>, CreationErrorForChainSpec<ChainSpecT>> {
-    if let Some(fork_config) = &config.fork {
-        create_forked_blockchain_and_state(runtime, config, timer, fork_config)
-    } else {
-        create_local_blockchain_and_state(config, timer)
+    match &config.network {
+        NetworkConfig::Fork(fork_config) => {
+            create_forked_blockchain_and_state(runtime, config, timer, fork_config)
+        }
+        NetworkConfig::Local(local_config) => {
+            create_local_blockchain_and_state(config, timer, local_config)
+        }
     }
 }
 
@@ -3303,7 +3215,6 @@ mod tests {
     use crate::{
         console_log::tests::{deploy_console_log_contract, ConsoleLogTransaction},
         test_utils::{create_test_config, one_ether, ProviderTestFixture},
-        MemPoolConfig, MiningConfig, ProviderConfig,
     };
 
     #[test]
@@ -4277,11 +4188,8 @@ mod tests {
         use edr_test_utils::env::json_rpc_url_provider;
 
         use super::*;
-        use crate::{
-            test_utils::{
-                l1_base_header_overrides, l1_header_overrides_before_merge, prague_header_overrides,
-            },
-            ForkConfig,
+        use crate::test_utils::{
+            l1_base_header_overrides, l1_header_overrides_before_merge, prague_header_overrides,
         };
 
         #[test]
@@ -4347,7 +4255,7 @@ mod tests {
 
             let config = ProviderConfig {
                 // SAFETY: literal is non-zero
-                block_gas_limit: unsafe { NonZeroU64::new_unchecked(1_000_000) },
+                default_transaction_gas_limit: unsafe { NonZeroU64::new_unchecked(1_000_000) },
                 chain_id: 1,
                 coinbase: Address::ZERO,
                 hardfork: edr_chain_l1::Hardfork::LONDON,
@@ -4502,6 +4410,12 @@ mod tests {
                 url: json_rpc_url_provider::ethereum_mainnet(),
                 header_overrides_constructor: l1_base_header_overrides,
             },
+            // Issue [#722](https://github.com/NomicFoundation/edr/issues/722)
+            mainnet_issue_722 => L1ChainSpec {
+                block_number: 21_041_283,
+                url: json_rpc_url_provider::ethereum_mainnet(),
+                header_overrides_constructor: l1_base_header_overrides,
+            },
             // This block contains both valid and invalid EIP-7702 transactions, introduced in Prague
             mainnet_prague => L1ChainSpec {
                 block_number: 23_376_625,
@@ -4525,6 +4439,11 @@ mod tests {
             },
             mainnet_requests_hash_not_empty => L1ChainSpec {
                 block_number: 24_105_015,
+                url: json_rpc_url_provider::ethereum_mainnet(),
+                header_overrides_constructor: prague_header_overrides,
+            },
+            mainnet_beacon_root_oracle_dependent => L1ChainSpec {
+                block_number: 24_735_736,
                 url: json_rpc_url_provider::ethereum_mainnet(),
                 header_overrides_constructor: prague_header_overrides,
             },

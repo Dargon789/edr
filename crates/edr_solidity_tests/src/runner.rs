@@ -44,7 +44,7 @@ use foundry_evm::{
         invariant::{CallDetails, InvariantContract},
         CounterExample, FuzzFixtures,
     },
-    traces::{load_contracts, TraceKind, TracingMode},
+    traces::{load_contracts, SetupTraceKind, SparsedTraceArena, TracingMode},
 };
 use itertools::Itertools;
 use proptest::test_runner::{FailurePersistence, RngAlgorithm, TestError, TestRng, TestRunner};
@@ -106,6 +106,9 @@ pub struct ContractRunner<
     span: tracing::Span,
     /// Test function level config overrides.
     test_function_overrides: &'a HashMap<TestFunctionIdentifier, TestFunctionConfigOverride>,
+    /// Whether gas reports are being generated. When enabled, isolation cannot
+    /// be disabled by function-level overrides.
+    generate_gas_report: bool,
 
     #[allow(clippy::type_complexity)]
     _phantom: PhantomData<fn() -> (EvmBuilderT, HaltReasonT, TransactionErrorT)>,
@@ -128,6 +131,9 @@ pub struct ContractRunnerOptions<'a> {
     pub invariant_config: &'a InvariantConfig,
     /// Test function level config overrides.
     pub test_function_overrides: &'a HashMap<TestFunctionIdentifier, TestFunctionConfigOverride>,
+    /// Whether gas reports are being generated. When enabled, isolation cannot
+    /// be disabled by function-level overrides.
+    pub generate_gas_report: bool,
 }
 
 /// Contract artifact related arguments to the contract runner.
@@ -190,6 +196,7 @@ impl<
             fuzz_config,
             invariant_config,
             test_function_overrides,
+            generate_gas_report,
         } = options;
 
         Self {
@@ -209,6 +216,7 @@ impl<
             executor_builder,
             span,
             test_function_overrides,
+            generate_gas_report,
             _phantom: PhantomData,
         }
     }
@@ -237,6 +245,47 @@ impl<
         NestedTraceDecoderT,
     >
 {
+    /// Applies function-level `isolate` and `evm_version` overrides to the
+    /// given executor. Returns `Err` with an error message if the
+    /// `evm_version` string is invalid.
+    fn apply_executor_overrides(
+        &self,
+        func: &Function,
+        executor: &mut Executor<
+            BlockT,
+            TxT,
+            EvmBuilderT,
+            HaltReasonT,
+            HardforkT,
+            TransactionErrorT,
+            ChainContextT,
+        >,
+    ) -> Result<(), String> {
+        let test_identifier = TestFunctionIdentifier {
+            contract_artifact: self.artifact_id.clone(),
+            function_selector: func.selector().to_string(),
+        };
+        if let Some(overrides) = self.test_function_overrides.get(&test_identifier) {
+            if let Some(isolate) = overrides.isolate {
+                // Don't allow overriding isolation when gas reports are being
+                // generated, as isolation is required for accurate gas
+                // measurements.
+                if !self.generate_gas_report {
+                    executor.inspector_mut().enable_isolation(isolate);
+                }
+            }
+            if let Some(evm_version) = overrides.evm_version.as_deref() {
+                match evm_version.parse() {
+                    Ok(spec) => executor.set_spec_id(spec),
+                    Err(_) => {
+                        return Err(format!("unknown EVM version: '{evm_version}'"));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Deploys the test contract inside the runner from the sending account,
     /// and optionally runs the `setUp` function on the test contract.
     fn setup(
@@ -305,7 +354,7 @@ impl<
             }
 
             let (raw, reason) = RawCallResult::from_evm_result(deploy_result.map(Into::into))?;
-            result.extend(raw, TraceKind::Deployment);
+            result.extend(raw, SetupTraceKind::Deployment);
             if reason.is_some() {
                 result.reason = reason;
                 return Ok(result);
@@ -333,7 +382,7 @@ impl<
             debug_assert_eq!(dr.address, address);
         }
         let (raw, reason) = RawCallResult::from_evm_result(deploy_result.map(Into::into))?;
-        result.extend(raw, TraceKind::Deployment);
+        result.extend(raw, SetupTraceKind::Deployment);
         if reason.is_some() {
             result.reason = reason;
             return Ok(result);
@@ -351,7 +400,7 @@ impl<
             trace!("calling setUp");
             let res = executor.setup(None, address, Some(self.revert_decoder));
             let (raw, reason) = RawCallResult::from_evm_result(res)?;
-            result.extend(raw, TraceKind::Setup);
+            result.extend(raw, SetupTraceKind::Setup);
             result.reason = reason;
         }
 
@@ -505,6 +554,7 @@ impl<
         if setup_fns.len() > 1 {
             return Ok(SuiteResult::new(
                 start.elapsed(),
+                Vec::new(),
                 [(
                     "setUp()".to_string(),
                     TestResult::fail("multiple setUp functions".to_string()),
@@ -525,6 +575,7 @@ impl<
             // Return a single test result failure if multiple functions declared.
             return Ok(SuiteResult::new(
                 start.elapsed(),
+                Vec::new(),
                 [(
                     "afterInvariant()".to_string(),
                     TestResult::fail("multiple afterInvariant functions".to_string()),
@@ -544,6 +595,33 @@ impl<
             match_sig
         });
 
+        // Filter out functions sequentially since it's very fast and there is no need
+        // to do it in parallel.
+        let find_timer = Instant::now();
+        let functions = self
+            .contract
+            .abi
+            .functions()
+            .filter(|func| is_matching_test(func, filter))
+            .collect::<Vec<_>>();
+        let find_time = find_timer.elapsed();
+        debug!(
+            "Found {} test functions out of {} in {:?}",
+            functions.len(),
+            self.contract.abi.functions().count(),
+            find_time,
+        );
+
+        // Avoid set-up if there are no test functions to run
+        if functions.is_empty() {
+            return Ok(SuiteResult::new(
+                start.elapsed(),
+                Vec::new(),
+                BTreeMap::new(),
+                warnings,
+            ));
+        }
+
         // Invariant testing requires tracing to figure out what contracts were created.
         // We also want to disable `debug` for setup since we won't be using those
         // traces.
@@ -559,7 +637,7 @@ impl<
         }
 
         let setup_time = Instant::now();
-        let mut setup = self.setup(&mut executor, call_setup);
+        let mut setup: TestSetup<HaltReasonT> = self.setup(&mut executor, call_setup);
         debug!("finished setting up in {:?}", setup_time.elapsed());
 
         executor.inspector_mut().tracer = prev_tracer;
@@ -610,27 +688,11 @@ impl<
             };
             return Ok(SuiteResult::new(
                 elapsed,
-                [(fail_msg, TestResult::setup_result(setup))].into(),
+                setup.traces.clone(),
+                [(fail_msg, TestResult::setup_failure_result(setup))].into(),
                 warnings,
             ));
         }
-
-        // Filter out functions sequentially since it's very fast and there is no need
-        // to do it in parallel.
-        let find_timer = Instant::now();
-        let functions = self
-            .contract
-            .abi
-            .functions()
-            .filter(|func| is_matching_test(func, filter))
-            .collect::<Vec<_>>();
-        let find_time = find_timer.elapsed();
-        debug!(
-            "Found {} test functions out of {} in {:?}",
-            functions.len(),
-            self.contract.abi.functions().count(),
-            find_time,
-        );
 
         let identified_contracts = has_invariants.then(|| {
             load_contracts(
@@ -649,7 +711,12 @@ impl<
             let test_results = test_fail_functions
                 .map(|func| (func.signature(), fail()))
                 .collect();
-            return Ok(SuiteResult::new(start.elapsed(), test_results, warnings));
+            return Ok(SuiteResult::new(
+                start.elapsed(),
+                setup.traces,
+                test_results,
+                warnings,
+            ));
         }
 
         let test_results = functions
@@ -685,7 +752,7 @@ impl<
             .collect::<BTreeMap<_, _>>();
 
         let duration = start.elapsed();
-        let suite_result = SuiteResult::new(duration, test_results, warnings);
+        let suite_result = SuiteResult::new(duration, setup.traces, test_results, warnings);
         info!(
             duration=?suite_result.duration,
             "done. {}/{} successful",
@@ -795,12 +862,21 @@ impl<
     }
 
     fn run(
-        self,
+        mut self,
         func: &Function,
         kind: TestFunctionKind,
         call_after_invariant: bool,
         identified_contracts: Option<&ContractsByAddress>,
     ) -> TestResult<HaltReasonT> {
+        // Apply executor config overrides.
+        if let Err(err) = self
+            .cr
+            .apply_executor_overrides(func, self.executor.to_mut())
+        {
+            self.result.single_fail(Some(err), Instant::now().elapsed());
+            return self.result;
+        }
+
         match kind {
             TestFunctionKind::UnitTest { .. } => self.run_unit_test(func),
             TestFunctionKind::FuzzTest { .. } => self.run_fuzz_test(func),
@@ -864,23 +940,21 @@ impl<
 
         let elapsed = start.elapsed();
 
-        // Exclude stack trace generation from test execution time for accurate
-        // reporting
+        // Indeterminism reasons are only relevant for stack trace generation
+        let indeterminism_reasons = raw_call_result.indeterminism_reasons.take();
+
+        self.result
+            .single_result(success, reason, raw_call_result, elapsed);
+
         self.result.stack_trace_result = if !success {
             let stack_trace_result: SolidityTestStackTraceResult<HaltReasonT> =
                 if self.executor.tracer_records_steps() {
-                    get_stack_trace(
+                    collect_stack_trace(
                         &*self.cr.contract_decoder,
-                        self.result.traces.iter().map(|(_, arena)| &arena.arena),
-                        None,
+                        self.setup,
+                        &self.result.execution_traces,
                     )
-                    .map_err(SolidityTestStackTraceError::from)
-                    .transpose()
-                    .expect("traces are not empty")
-                    .into()
-                } else if let Some(indeterminism_reasons) =
-                    raw_call_result.indeterminism_reasons.take()
-                {
+                } else if let Some(indeterminism_reasons) = indeterminism_reasons {
                     indeterminism_reasons.into()
                 } else {
                     self.re_run_test_for_stack_traces(func, &[], self.setup.has_setup_method)
@@ -890,9 +964,6 @@ impl<
         } else {
             None
         };
-
-        self.result
-            .single_result(success, reason, raw_call_result, elapsed);
 
         self.result
     }
@@ -1021,29 +1092,26 @@ impl<
                     )));
                 let elapsed = start.elapsed();
 
+                // Indeterminism reasons are only relevant for stack trace generation
+                let indeterminism_reasons = raw_call_result.indeterminism_reasons.take();
+
+                self.result
+                    .single_result(false, reason, raw_call_result, elapsed);
+
                 let stack_trace_result: SolidityTestStackTraceResult<HaltReasonT> =
                     if self.executor.tracer_records_steps() {
-                        get_stack_trace(
+                        collect_stack_trace(
                             &*self.cr.contract_decoder,
-                            self.result.traces.iter().map(|(_, arena)| &arena.arena),
-                            None,
+                            self.setup,
+                            &self.result.execution_traces,
                         )
-                        .map_err(SolidityTestStackTraceError::from)
-                        .transpose()
-                        .expect("traces are not empty")
-                        .into()
-                    } else if let Some(indeterminism_reasons) =
-                        raw_call_result.indeterminism_reasons.take()
-                    {
+                    } else if let Some(indeterminism_reasons) = indeterminism_reasons {
                         indeterminism_reasons.into()
                     } else {
                         self.re_run_test_for_stack_traces(func, &args, self.setup.has_setup_method)
                             .into()
                     };
                 self.result.stack_trace_result = Some(stack_trace_result);
-
-                self.result
-                    .single_result(false, reason, raw_call_result, elapsed);
 
                 return self.result;
             }
@@ -1121,6 +1189,7 @@ impl<
         );
 
         let mut executor = self.clone_executor();
+
         // Enable edge coverage if running with coverage guided fuzzing or with edge
         // coverage metrics (useful for benchmarking the fuzzer).
         executor.inspector_mut().collect_edge_coverage(
@@ -1180,11 +1249,12 @@ impl<
                 // exit without executing new runs.
                 let stack_trace_result = replay_run(ReplayRunArgs {
                     executor: self.clone_executor(),
+                    execution_traces: &mut self.result.execution_traces,
                     invariant_contract: &invariant_contract,
                     known_contracts: self.cr.known_contracts,
                     ided_contracts: identified_contracts.clone(),
                     logs: &mut self.result.logs,
-                    traces: &mut self.result.traces,
+                    setup_traces: &self.setup.traces,
                     line_coverage: &mut self.result.line_coverage,
                     deprecated_cheatcodes: &mut self.result.deprecated_cheatcodes,
                     inputs: &txes,
@@ -1211,29 +1281,28 @@ impl<
             &self.setup.deployed_libs,
         ) {
             Ok(x) => x,
-            Err(e) => {
+            Err(error) => {
                 let elapsed = start.elapsed();
+
+                // Indeterminism reasons are only relevant for stack trace generation
+                let indeterminism_reasons = error.indetereminism_reasons();
+
+                self.result.invariant_setup_fail(error, elapsed);
 
                 let stack_trace_result: SolidityTestStackTraceResult<HaltReasonT> =
                     if self.executor.tracer_records_steps() {
-                        get_stack_trace(
+                        collect_stack_trace(
                             &*self.cr.contract_decoder,
-                            self.result.traces.iter().map(|(_, arena)| &arena.arena),
-                            None,
+                            self.setup,
+                            &self.result.execution_traces,
                         )
-                        .map_err(SolidityTestStackTraceError::from)
-                        .transpose()
-                        .expect("traces are not empty")
-                        .into()
-                    } else if let Some(indeterminism_reasons) = e.indetereminism_reasons() {
+                    } else if let Some(indeterminism_reasons) = indeterminism_reasons {
                         indeterminism_reasons.into()
                     } else {
                         self.re_run_test_for_stack_traces(func, &[], self.setup.has_setup_method)
                             .into()
                     };
                 self.result.stack_trace_result = Some(stack_trace_result);
-
-                self.result.invariant_setup_fail(e, elapsed);
 
                 return self.result;
             }
@@ -1257,12 +1326,13 @@ impl<
                     // coverage.
                     match replay_error(ReplayErrorArgs {
                         executor: self.clone_executor(),
+                        execution_traces: &mut self.result.execution_traces,
                         failed_case: &case_data,
                         invariant_contract: &invariant_contract,
                         known_contracts: self.cr.known_contracts,
                         ided_contracts: identified_contracts.clone(),
                         logs: &mut self.result.logs,
-                        traces: &mut self.result.traces,
+                        setup_traces: &self.setup.traces,
                         coverage: &mut None,
                         deprecated_cheatcodes: &mut self.result.deprecated_cheatcodes,
                         generate_stack_trace: true,
@@ -1330,11 +1400,12 @@ impl<
             _ => {
                 if let Err(err) = replay_run(ReplayRunArgs {
                     executor: self.clone_executor(),
+                    execution_traces: &mut self.result.execution_traces,
                     invariant_contract: &invariant_contract,
                     known_contracts: self.cr.known_contracts,
                     ided_contracts: identified_contracts.clone(),
                     logs: &mut self.result.logs,
-                    traces: &mut self.result.traces,
+                    setup_traces: &self.setup.traces,
                     line_coverage: &mut self.result.line_coverage,
                     deprecated_cheatcodes: &mut self.result.deprecated_cheatcodes,
                     inputs: &invariant_result.last_run_inputs,
@@ -1435,15 +1506,11 @@ impl<
         {
             let stack_trace_result: SolidityTestStackTraceResult<_> =
                 if fuzzed_executor.tracer_records_steps() {
-                    get_stack_trace(
+                    collect_stack_trace(
                         &*self.cr.contract_decoder,
-                        self.result.traces.iter().map(|(_, arena)| &arena.arena),
-                        None,
+                        self.setup,
+                        &self.result.execution_traces,
                     )
-                    .map_err(SolidityTestStackTraceError::from)
-                    .transpose()
-                    .expect("traces are not empty")
-                    .into()
                 } else if let Some(indeterminism_reasons) =
                     counter_example.indeterminism_reasons.clone()
                 {
@@ -1451,6 +1518,7 @@ impl<
                 } else {
                     re_run_fuzz_counterexample_for_stack_traces(
                         self.cr,
+                        func,
                         self.setup.address,
                         counter_example,
                         self.setup.has_setup_method,
@@ -1537,6 +1605,10 @@ impl<
     ) -> Result<Vec<StackTraceEntry>, SolidityTestStackTraceError<HaltReasonT>> {
         let mut executor = self.cr.executor_builder.clone().build()?;
 
+        // Apply executor config overrides.
+        // Error is ignored since overrides were already validated in run().
+        let _ = self.cr.apply_executor_overrides(func, &mut executor);
+
         // We only need light-weight tracing for setup to be able to match contract
         // codes to contact addresses.
         executor.inspector_mut().tracing(TracingMode::WithoutSteps);
@@ -1551,7 +1623,7 @@ impl<
         executor.inspector_mut().tracing(TracingMode::WithSteps);
 
         // Run unit test
-        let new_traces = match executor.call(
+        let new_trace_arena = match executor.call(
             self.cr.sender,
             setup.address,
             func,
@@ -1565,18 +1637,47 @@ impl<
         }
         .expect("enabled tracing");
 
-        let mut traces = setup.traces;
-        traces.push((TraceKind::Execution, new_traces));
-
         get_stack_trace(
             &*self.cr.contract_decoder,
-            traces.iter().map(|(_, arena)| &arena.arena),
+            setup
+                .traces
+                .iter()
+                .map(|(_, arena)| &arena.arena)
+                .chain(std::iter::once(&new_trace_arena.arena)),
             None,
         )
         .transpose()
         .expect("traces are not empty")
         .map_err(SolidityTestStackTraceError::Creation)
     }
+}
+
+/// Builds a stack trace from the traces recorded during this run.
+///
+/// Taken as an associated function of explicit fields rather than `&self`
+/// so it can be called from the fuzz path, where `self.executor` has
+/// already been moved out.
+fn collect_stack_trace<
+    HaltReasonT: 'static + HaltReasonTrait + TryInto<HaltReason>,
+    NestedTraceDecoderT: SyncNestedTraceDecoder<HaltReasonT>,
+>(
+    contract_decoder: &NestedTraceDecoderT,
+    setup: &TestSetup<HaltReasonT>,
+    execution_traces: &[SparsedTraceArena],
+) -> SolidityTestStackTraceResult<HaltReasonT> {
+    get_stack_trace(
+        contract_decoder,
+        setup
+            .traces
+            .iter()
+            .map(|(_, arena)| &arena.arena)
+            .chain(execution_traces.iter().map(|arena| &arena.arena)),
+        None,
+    )
+    .map_err(SolidityTestStackTraceError::from)
+    .transpose()
+    .expect("traces are not empty")
+    .into()
 }
 
 /// Re-run the deployment, setup and test execution with expensive EVM step
@@ -1604,11 +1705,16 @@ fn re_run_fuzz_counterexample_for_stack_traces<
         TxT,
         NestedTraceDecoderT,
     >,
+    func: &Function,
     address: Address,
     counter_example: &BaseCounterExample,
     needs_setup: bool,
 ) -> Result<Vec<StackTraceEntry>, SolidityTestStackTraceError<HaltReasonT>> {
     let mut executor = contract_runner.executor_builder.clone().build()?;
+
+    // Apply executor config overrides.
+    // Error is ignored since overrides were already validated in run().
+    let _ = contract_runner.apply_executor_overrides(func, &mut executor);
 
     // We only need light-weight tracing for setup to be able to match contract
     // codes to contact addresses.
@@ -1633,12 +1739,15 @@ fn re_run_fuzz_counterexample_for_stack_traces<
         )
         .map_err(|err| SolidityTestStackTraceError::Evm(err.to_string()))?;
 
-    let mut traces = setup.traces;
-    traces.push((TraceKind::Execution, call.traces.expect("tracing is on")));
+    let new_trace_arena = call.traces.expect("tracing is on");
 
     get_stack_trace(
         &*contract_runner.contract_decoder,
-        traces.iter().map(|(_, arena)| &arena.arena),
+        setup
+            .traces
+            .iter()
+            .map(|(_, arena)| &arena.arena)
+            .chain(std::iter::once(&new_trace_arena.arena)),
         None,
     )
     .transpose()

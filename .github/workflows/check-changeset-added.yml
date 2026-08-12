@@ -14,6 +14,10 @@ on:
       - labeled
       - unlabeled
 
+# Only reads PR files and labels via the API.
+permissions:
+  pull-requests: read
+
 jobs:
   check-if-changeset:
     name: Check that PR has a changeset
@@ -21,7 +25,7 @@ jobs:
     # don't run this check in the changesets PR
     if: github.head_ref != 'changeset-release/main'
     steps:
-      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v.8.0.0
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const pullNumber = context.issue.number;

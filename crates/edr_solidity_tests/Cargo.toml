@@ -19,31 +19,26 @@ foundry-cheatcodes.workspace = true
 foundry-compilers = { workspace = true }
 foundry-evm.workspace = true
 
-comfy-table = "7"
 derive_more.workspace = true
 derive-where.workspace = true
 dunce.workspace = true
 eyre.workspace = true
 futures = "0.3"
 itertools.workspace = true
-num_cpus = "1.16.0"
 proptest.workspace = true
 rayon = "1"
 regex.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 tracing.workspace = true
 yansi.workspace = true
 humantime-serde = "1.1.1"
 
 alloy-dyn-abi.workspace = true
 alloy-json-abi.workspace = true
-alloy-primitives = { workspace = true, features = ["serde"] }
+alloy-primitives = { workspace = true, features = ["map-hashbrown", "serde"] }
 
 tokio = { workspace = true, features = ["time"] }
-evm-disassembler.workspace = true
 thiserror = "2.0.12"
-log = "0.4.22"
 
 [dev-dependencies]
 edr_chain_l1.workspace = true
@@ -52,7 +47,9 @@ futures = "0.3"
 itertools.workspace = true
 num-traits = "0.2.19"
 once_cell = "1"
+parking_lot.workspace = true
 paste = "1.0"
+serde_json.workspace = true
 semver.workspace = true
 serial_test = "2.0.0"
 tempfile.workspace = true

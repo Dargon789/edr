@@ -223,7 +223,7 @@ impl<HaltReasonT: HaltReasonTrait> NestedTracer<HaltReasonT> {
         if let Some(trace) = self.message_traces.last_mut() {
             let mut trace = trace.borrow_mut();
 
-            trace.set_gas_used(result.gas_used());
+            trace.set_gas_used(result.tx_gas_used());
 
             match result {
                 ExecutionResult::Success { output, .. } => {
@@ -396,7 +396,7 @@ fn convert_to_external_trace<HaltReasonT: HaltReasonTrait>(
             NestedTrace::Create(CreateMessage {
                 number_of_subtraces,
                 steps: steps.into_iter().map(convert_to_external_step).collect(),
-                contract_meta: None,
+                identified_contract: None,
                 deployed_contract,
                 code,
                 value,
@@ -423,7 +423,7 @@ fn convert_to_external_trace<HaltReasonT: HaltReasonTrait>(
             NestedTrace::Call(CallMessage {
                 number_of_subtraces,
                 steps: steps.into_iter().map(convert_to_external_step).collect(),
-                contract_meta: None,
+                identified_contract: None,
                 calldata,
                 address,
                 code_address,

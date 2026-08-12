@@ -1,24 +1,22 @@
-import { toBytes } from "@nomicfoundation/ethereumjs-util";
 import chai, { assert, expect } from "chai";
 import chaiAsPromised from "chai-as-promised";
 import * as fs from "fs";
 
 import {
-  AccountOverride,
-  ContractDecoder,
-  GENERIC_CHAIN_TYPE,
-  genericChainProviderFactory,
   L1_CHAIN_TYPE,
-  l1GenesisState,
-  l1HardforkFromString,
   l1HardforkLatest,
   l1HardforkToString,
   l1SolidityTestRunnerFactory,
-  MineOrdering,
-  SubscriptionEvent,
   TestStatus,
 } from "..";
-import { getContext, loadContract, runAllSolidityTests } from "./helpers";
+import {
+  createGenericProvider,
+  fundedGenesisState,
+  getContext,
+  loadContract,
+  registerGenericProviderFactory,
+  runAllSolidityTests,
+} from "./helpers";
 
 chai.use(chaiAsPromised);
 
@@ -26,15 +24,15 @@ class CoverageReporter {
   public hits: Uint8Array[] = [];
 }
 
-function readDeployedBytecode(): string {
-  const filePath = `${__dirname}/../../../data/deployed_bytecode/increment.in`;
+function readDeploymentBytecode(): string {
+  const filePath = `${__dirname}/../../../data/deployment_bytecode/Increment.bin`;
   return fs.readFileSync(filePath, "utf8");
 }
 
 describe("Code coverage", () => {
   const context = getContext();
 
-  const incrementDeployedBytecode = readDeployedBytecode();
+  const incrementDeploymentBytecode = readDeploymentBytecode();
 
   // > cast calldata 'function incBy(uint)' 1
   const incrementCallData =
@@ -44,10 +42,7 @@ describe("Code coverage", () => {
 
   let coverageReporter: CoverageReporter;
   before(async () => {
-    await context.registerProviderFactory(
-      GENERIC_CHAIN_TYPE,
-      genericChainProviderFactory()
-    );
+    await registerGenericProviderFactory(context);
 
     await context.registerSolidityTestRunnerFactory(
       L1_CHAIN_TYPE,
@@ -60,81 +55,24 @@ describe("Code coverage", () => {
     coverageReporter = new CoverageReporter();
   });
 
-  const genesisState: AccountOverride[] = [
-    {
-      address: toBytes("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"),
-      balance: 1000n * 10n ** 18n,
-    },
-  ];
-
-  const providerConfig = {
-    allowBlocksWithSameTimestamp: false,
-    allowUnlimitedContractSize: true,
-    bailOnCallFailure: false,
-    bailOnTransactionFailure: false,
-    blockGasLimit: 300_000_000n,
-    chainId: 123n,
-    chainOverrides: [],
-    coinbase: new Uint8Array(
-      Buffer.from("0000000000000000000000000000000000000000", "hex")
-    ),
-    genesisState,
-    hardfork: l1HardforkToString(l1HardforkLatest()),
-    initialBlobGas: {
-      gasUsed: 0n,
-      excessGas: 0n,
-    },
-    initialParentBeaconBlockRoot: new Uint8Array(
-      Buffer.from(
-        "0000000000000000000000000000000000000000000000000000000000000000",
-        "hex"
-      )
-    ),
-    minGasPrice: 0n,
-    mining: {
-      autoMine: true,
-      memPool: {
-        order: MineOrdering.Priority,
-      },
-    },
-    networkId: 123n,
-    observability: {
-      codeCoverage: {
-        onCollectedCoverageCallback: async (coverage: Uint8Array[]) => {
-          coverageReporter.hits.push(...coverage);
-        },
-      },
-    },
-    ownedAccounts: [
-      "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
-    ],
-    precompileOverrides: [],
-  };
-
-  const loggerConfig = {
-    enable: false,
-    decodeConsoleLogInputsCallback: (_inputs: ArrayBuffer[]): string[] => {
-      return [];
-    },
-    printLineCallback: (_message: string, _replace: boolean) => {},
+  const providerOverrides = {
+    defaultTransactionGasLimit: 16_777_216n,
+    genesisState: fundedGenesisState(),
   };
 
   describe("eth_sendTransaction", function () {
     it("should report code coverage hits", async function () {
-      const provider = await context.createProvider(
-        GENERIC_CHAIN_TYPE,
-        {
-          ...providerConfig,
-          genesisState: providerConfig.genesisState.concat(
-            l1GenesisState(l1HardforkFromString(providerConfig.hardfork))
-          ),
+      const provider = await createGenericProvider(context, {
+        ...providerOverrides,
+        observability: {
+          codeCoverage: {
+            // eslint-disable-next-line @typescript-eslint/require-await -- napi callback signature is (…) => Promise<void>
+            onCollectedCoverageCallback: async (coverage: Uint8Array[]) => {
+              coverageReporter.hits.push(...coverage);
+            },
+          },
         },
-        loggerConfig,
-        {
-          subscriptionCallback: (_event: SubscriptionEvent) => {},
-        },
-        new ContractDecoder()
-      );
+      });
 
       const sendTransactionResponse = await provider.handleRequest(
         JSON.stringify({
@@ -144,7 +82,7 @@ describe("Code coverage", () => {
           params: [
             {
               from: "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
-              data: incrementDeployedBytecode,
+              data: incrementDeploymentBytecode,
             },
           ],
         })
@@ -194,27 +132,17 @@ describe("Code coverage", () => {
     });
 
     it("should handle thrown exception", async function () {
-      const provider = await context.createProvider(
-        GENERIC_CHAIN_TYPE,
-        {
-          ...providerConfig,
-          genesisState: providerConfig.genesisState.concat(
-            l1GenesisState(l1HardforkFromString(providerConfig.hardfork))
-          ),
-          observability: {
-            codeCoverage: {
-              onCollectedCoverageCallback: async (_coverage: Uint8Array[]) => {
-                throw new Error(ERROR_MESSAGE);
-              },
+      const provider = await createGenericProvider(context, {
+        ...providerOverrides,
+        observability: {
+          codeCoverage: {
+            // eslint-disable-next-line @typescript-eslint/require-await -- napi callback signature is (…) => Promise<void>
+            onCollectedCoverageCallback: async (_coverage: Uint8Array[]) => {
+              throw new Error(ERROR_MESSAGE);
             },
           },
         },
-        loggerConfig,
-        {
-          subscriptionCallback: (_event: SubscriptionEvent) => {},
-        },
-        new ContractDecoder()
-      );
+      });
 
       const sendTransactionResponse = await provider.handleRequest(
         JSON.stringify({
@@ -224,13 +152,16 @@ describe("Code coverage", () => {
           params: [
             {
               from: "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266",
-              data: incrementDeployedBytecode,
+              data: incrementDeploymentBytecode,
             },
           ],
         })
       );
 
-      const error = JSON.parse(sendTransactionResponse.data).error;
+      const error = JSON.parse(sendTransactionResponse.data).error as {
+        message: string;
+        code: number;
+      };
 
       assert(
         error.message.includes(ERROR_MESSAGE),
@@ -251,10 +182,12 @@ describe("Code coverage", () => {
       // All artifacts are test suites.
       const testSuites = artifacts.map((artifact) => artifact.id);
       const config = {
+        disableTransactionGasCap: true,
         projectRoot: __dirname,
         hardfork: l1HardforkToString(l1HardforkLatest()),
         observability: {
           codeCoverage: {
+            // eslint-disable-next-line @typescript-eslint/require-await -- napi callback signature is (…) => Promise<void>
             onCollectedCoverageCallback: async (coverage: Uint8Array[]) => {
               coverageReporter.hits.push(...coverage);
             },
@@ -283,10 +216,12 @@ describe("Code coverage", () => {
       // All artifacts are test suites.
       const testSuites = artifacts.map((artifact) => artifact.id);
       const config = {
+        disableTransactionGasCap: true,
         projectRoot: __dirname,
         hardfork: l1HardforkToString(l1HardforkLatest()),
         observability: {
           codeCoverage: {
+            // eslint-disable-next-line @typescript-eslint/require-await -- napi callback signature is (…) => Promise<void>
             onCollectedCoverageCallback: async (_coverage: Uint8Array[]) => {
               throw new Error(ERROR_MESSAGE);
             },
@@ -307,7 +242,7 @@ describe("Code coverage", () => {
           assert.equal(testResult.status, TestStatus.Failure);
           assert.isDefined(testResult.reason);
           assert(
-            testResult.reason!.includes(ERROR_MESSAGE),
+            testResult.reason.includes(ERROR_MESSAGE),
             `Test failure reason should contain the expected error. Found: ${testResult.reason}`
           );
         }

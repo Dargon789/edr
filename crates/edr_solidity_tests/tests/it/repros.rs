@@ -6,11 +6,11 @@ use alloy_json_abi::Event;
 use alloy_primitives::address;
 use alloy_primitives::{b256, Address, U256};
 use edr_chain_spec::{EvmHaltReason, HaltReasonTrait};
-use edr_solidity::config::IncludeTraces;
+use edr_solidity::{config::IncludeTraces, solidity_stack_trace::StackTraceEntry};
 use edr_solidity_tests::{
     result::{TestKind, TestStatus},
     revm::context::{BlockEnv, TxEnv},
-    SolidityTestRunnerConfig,
+    CollectStackTraces, SolidityTestRunnerConfig,
 };
 use foundry_cheatcodes::{FsPermissions, PathPermission};
 use foundry_evm::{
@@ -20,11 +20,13 @@ use foundry_evm::{
         BlockEnvTr, ChainContextTr, EvmBuilderTrait, HardforkTr, L1EvmBuilder, TransactionEnvTr,
         TransactionErrorTrait,
     },
-    traces::{CallKind, CallTraceDecoder, DecodedCallData, TraceKind},
+    executors::stack_trace::SolidityTestStackTraceResult,
+    traces::{CallKind, CallTraceDecoder, DecodedCallData},
 };
 
 use crate::helpers::{
-    ForgeTestData, L1ForgeTestData, SolidityTestFilter, TestConfig, TEST_DATA_DEFAULT,
+    contract_decoder, ForgeTestData, L1ForgeTestData, SolidityTestFilter, TestConfig,
+    TEST_DATA_DEFAULT, TEST_DATA_VIA_IR,
 };
 
 macro_rules! remote_test_repro {
@@ -411,9 +413,12 @@ test_repro!(6501, false, None, |res| {
         ["a".to_string(), "1".to_string(), "b 2".to_string()]
     );
 
-    let (kind, traces) = test.traces.last().expect("there are traces").clone();
-    let nodes = traces.arena.into_nodes();
-    assert_eq!(kind, TraceKind::Execution);
+    let execution_traces = test
+        .execution_traces
+        .last()
+        .expect("there are traces")
+        .clone();
+    let nodes = execution_traces.arena.into_nodes();
 
     let test_call = nodes.first().unwrap();
     assert_eq!(test_call.idx, 0);
@@ -585,3 +590,179 @@ test_repro!(5521, false, None, |res| {
     let test = res.test_results.remove("test_stackPrank()").unwrap();
     assert_eq!(test.status, TestStatus::Success);
 });
+
+// https://github.com/NomicFoundation/edr/issues/1482
+//
+// When the test sources are compiled with `via_ir`, calling an unsupported
+// cheatcode must still produce a "cheatcode '...' is not supported" stack trace
+// entry, rather than falling through to a generic "reverted with an
+// unrecognized custom error" entry (the `StructuredCheatcodeError` selector
+// `0xdd2ce9c4`). The `Issue1482Test` suite lives in the `via-ir` test profile,
+// which is compiled with `via_ir = true`.
+#[tokio::test(flavor = "multi_thread")]
+async fn issue_1482() {
+    let config = runner_config(None, &TEST_DATA_VIA_IR, false).await;
+    // Use a real contract decoder (not the `NoOpContractDecoder` the other
+    // helpers use) so that the test contract is recognized and the full stack
+    // trace error inferrer runs — that's where the cheatcode error is decoded.
+    let contract_decoder = contract_decoder(TEST_DATA_VIA_IR.build_info_path());
+    let runner = TEST_DATA_VIA_IR
+        .runner_with_contract_decoder(config, contract_decoder)
+        .await;
+    let filter = repro_filter(1482);
+    let suite_results = runner.test_collect(filter).await.suite_results;
+
+    let suite = suite_results
+        .get("via-ir/repros/Issue1482.t.sol:Issue1482Test")
+        .expect("the Issue1482 test suite should have run");
+
+    let result = suite
+        .test_results
+        .get("testUnsupportedBreakpoint()")
+        .expect("testUnsupportedBreakpoint should have run");
+
+    assert_eq!(
+        result.status,
+        TestStatus::Failure,
+        "the test should fail because the cheatcode is unsupported"
+    );
+
+    let stack_trace = match result
+        .stack_trace_result
+        .as_ref()
+        .expect("stack trace should be computed on failure")
+    {
+        SolidityTestStackTraceResult::Success(entries) => entries,
+        other => panic!("expected a stack trace, got {other:?}"),
+    };
+
+    assert!(
+        stack_trace.iter().any(|entry| matches!(
+            entry,
+            StackTraceEntry::CheatCodeError { message, .. } if message.contains("not supported")
+        )),
+        "expected an unsupported-cheatcode stack trace entry, got:\n{stack_trace:#?}"
+    );
+}
+
+// Asserts that a failing test produced a decoded stack trace that reaches the
+// failing call's execution error, and returns the result for further checks.
+fn assert_execution_error_stack_trace<'suite, HaltReasonT: HaltReasonTrait>(
+    suite: &'suite edr_solidity_tests::result::SuiteResult<HaltReasonT>,
+    test_name: &str,
+) -> &'suite edr_solidity_tests::result::TestResult<HaltReasonT> {
+    let result = suite
+        .test_results
+        .get(test_name)
+        .unwrap_or_else(|| panic!("{test_name} should have run"));
+
+    assert_eq!(result.status, TestStatus::Failure, "{test_name}");
+
+    let stack_trace = match result
+        .stack_trace_result
+        .as_ref()
+        .unwrap_or_else(|| panic!("{test_name}: stack trace should be computed"))
+    {
+        SolidityTestStackTraceResult::Success(entries) => entries,
+        other => panic!("{test_name}: expected a stack trace, got {other:?}"),
+    };
+
+    // A non-empty trace that reaches the failing call's execution error
+    // (exact variant depends on the compilation mode).
+    assert!(
+        stack_trace.iter().any(|entry| matches!(
+            entry,
+            StackTraceEntry::RevertError { .. }
+                | StackTraceEntry::PanicError { .. }
+                | StackTraceEntry::CustomError { .. }
+                | StackTraceEntry::OtherExecutionError { .. }
+        )),
+        "{test_name}: expected an execution-error stack trace, got:\n{stack_trace:#?}"
+    );
+
+    result
+}
+
+// A failing test in `CollectStackTraces::Always` mode must produce a
+// source-level stack trace, not `HeuristicFailed`. Covers the unit-test,
+// table-test, fuzz and invariant paths.
+#[tokio::test(flavor = "multi_thread")]
+async fn always_mode_produces_stack_trace_for_failing_test() {
+    let mut config = runner_config(None, &TEST_DATA_VIA_IR, false).await;
+    config.collect_stack_traces = CollectStackTraces::Always;
+    // The invariant fixture fails on the first call of the first run; keep the
+    // campaign bounded in case a regression makes it pass instead.
+    config.invariant.runs = 10;
+    config.invariant.depth = 10;
+
+    // Real decoder so the stack-trace inferrer runs (mirrors `issue_1482`).
+    let contract_decoder = contract_decoder(TEST_DATA_VIA_IR.build_info_path());
+    let runner = TEST_DATA_VIA_IR
+        .runner_with_contract_decoder(config, contract_decoder)
+        .await;
+    let filter = SolidityTestFilter::path(".*repros/StackTraceAlwaysMode.t.sol");
+    let suite_results = runner.test_collect(filter).await.suite_results;
+
+    let suite = suite_results
+        .get("via-ir/repros/StackTraceAlwaysMode.t.sol:AlwaysStackTraceTest")
+        .expect("the AlwaysStackTrace suite should have run");
+
+    assert_execution_error_stack_trace(suite, "testRevertHasStackTrace()");
+    assert_execution_error_stack_trace(suite, "tableRevertHasStackTrace(uint256)");
+
+    let fuzz_result =
+        assert_execution_error_stack_trace(suite, "testFuzzRevertHasStackTrace(uint256)");
+    assert!(
+        matches!(fuzz_result.kind, TestKind::Fuzz { .. }),
+        "expected a fuzz test kind, got {:?}",
+        fuzz_result.kind
+    );
+
+    let invariant_suite = suite_results
+        .get("via-ir/repros/StackTraceAlwaysMode.t.sol:AlwaysStackTraceInvariantTest")
+        .expect("the AlwaysStackTraceInvariant suite should have run");
+
+    let invariant_result =
+        assert_execution_error_stack_trace(invariant_suite, "invariantCountIsZero()");
+    assert!(
+        matches!(invariant_result.kind, TestKind::Invariant { .. }),
+        "expected an invariant test kind, got {:?}",
+        invariant_result.kind
+    );
+    // A counterexample proves the invariant was broken by fuzzed calls (and
+    // replayed), rather than failing the campaign's initial check.
+    assert!(
+        invariant_result.counterexample.is_some(),
+        "expected a counterexample call sequence"
+    );
+
+    // An invariant that is already broken in the initial state fails the
+    // campaign's initial check (`invariant_fuzz` returns an error before any
+    // fuzzed calls); that path must produce a stack trace too.
+    let invariant_initial_suite = suite_results
+        .get("via-ir/repros/StackTraceAlwaysMode.t.sol:AlwaysStackTraceInvariantInitialTest")
+        .expect("the AlwaysStackTraceInvariantInitial suite should have run");
+
+    let invariant_initial_result =
+        assert_execution_error_stack_trace(invariant_initial_suite, "invariantAlwaysBroken()");
+    // Only the `invariant_fuzz` error path (`TestResult::invariant_setup_fail`)
+    // produces this reason and a zero-runs invariant kind.
+    assert!(
+        matches!(
+            invariant_initial_result.kind,
+            TestKind::Invariant { runs: 0, .. }
+        ),
+        "expected a zero-runs invariant test kind, got {:?}",
+        invariant_initial_result.kind
+    );
+    assert!(
+        invariant_initial_result
+            .reason
+            .as_deref()
+            .is_some_and(|reason| {
+                reason.starts_with("failed to set up invariant testing environment")
+            }),
+        "expected an invariant setup failure, got {:?}",
+        invariant_initial_result.reason
+    );
+}

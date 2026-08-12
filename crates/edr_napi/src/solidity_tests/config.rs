@@ -31,7 +31,7 @@ use crate::{
 /// Docs based on <https://book.getfoundry.sh/reference/config/testing>.
 #[napi(object)]
 #[derive(Debug, serde::Serialize)]
-pub struct SolidityTestRunnerConfigArgs {
+pub struct SolidityTestRunnerConfigArgs<'env> {
     /// The absolute path to the project root directory.
     /// Relative paths in cheat codes are resolved against this path.
     pub project_root: String,
@@ -109,9 +109,18 @@ pub struct SolidityTestRunnerConfigArgs {
     /// Whether to disable the block gas limit.
     /// Defaults to false.
     pub disable_block_gas_limit: Option<bool>,
-    /// Whether to enable the EIP-7825 (Osaka) transaction gas limit cap.
+    /// Transaction gas cap, introduced in [EIP-7825].
+    ///
+    /// When not set, defaults to the value defined by the used hardfork.
+    ///
+    /// [EIP-7825]: https://eips.ethereum.org/EIPS/eip-7825
+    #[serde(serialize_with = "serialize_optional_bigint_as_struct")]
+    pub transaction_gas_cap: Option<BigInt>,
+    /// Whether to disable the [EIP-7825] transaction gas cap.
     /// Defaults to false.
-    pub enable_tx_gas_limit_cap: Option<bool>,
+    ///
+    /// [EIP-7825]: https://eips.ethereum.org/EIPS/eip-7825
+    pub disable_transaction_gas_cap: Option<bool>,
     /// The memory limit of the EVM in bytes.
     /// Defaults to `33_554_432` (2^25 = 32MiB).
     #[serde(serialize_with = "serialize_optional_bigint_as_struct")]
@@ -155,10 +164,14 @@ pub struct SolidityTestRunnerConfigArgs {
     /// The configuration for the Solidity test runner's observability
     #[debug(skip)]
     #[serde(skip)]
-    pub observability: Option<ObservabilityConfig>,
+    pub observability: Option<ObservabilityConfig<'env>>,
     /// A regex pattern to filter tests. If provided, only test methods that
     /// match the pattern will be executed and reported as a test result.
     pub test_pattern: Option<String>,
+    /// A regex pattern to exclude tests. If provided, test methods that match
+    /// the pattern will not be executed or reported as a test result. Applied
+    /// after `test_pattern`.
+    pub exclude_test_pattern: Option<String>,
     /// Controls whether to generate a gas report after running the tests.
     /// Enabling this also enables collection of all traces and EVM isolation
     /// mode.
@@ -167,14 +180,45 @@ pub struct SolidityTestRunnerConfigArgs {
     /// Test function level config overrides.
     /// Defaults to none.
     pub test_function_overrides: Option<Vec<TestFunctionOverride>>,
+    /// A list of EIP-712 canonical type definitions that can be referenced by
+    /// type name in the `eip712HashType` and `eip712HashStruct` cheatcodes.
+    ///
+    /// Each entry is an independent, self-contained type definition. A
+    /// definition that references nested struct types must inline those
+    /// struct definitions, per the EIP-712 `encodeType` spec.
+    ///
+    /// Only the primary (leftmost) type of each entry is registered by name.
+    /// Nested struct types referenced inside an entry are *not* registered
+    /// under their own names. To look up a nested struct by name from a
+    /// cheatcode, add it as a separate top-level entry whose primary type
+    /// is the nested struct.
+    ///
+    /// The type of a struct is encoded as:
+    ///
+    /// `name ‖ "(" ‖ member₁ ‖ "," ‖ member₂ ‖ "," ‖ … ‖ memberₙ ")"`
+    ///
+    /// where each member is written as `type ‖ " " ‖ name`.
+    ///
+    /// Entries that fail to parse cause a startup error listing every bad
+    /// entry.
+    ///
+    /// Example — to make both `Mail` and `Person` reachable by name:
+    ///
+    /// ```text
+    /// "Mail(Person from,Person to,string contents)Person(address wallet,string name)"
+    /// "Person(address wallet,string name)"
+    /// ```
+    ///
+    /// With *only* the first entry, `vm.eip712HashType("Mail")` works but
+    /// `vm.eip712HashType("Person")` fails with an unknown-type error.
+    pub eip712_canonical_types: Option<Vec<String>>,
 }
 
-impl SolidityTestRunnerConfigArgs {
+impl SolidityTestRunnerConfigArgs<'_> {
     /// Resolves the instance, converting it to a
     /// [`edr_napi_core::solidity::config::TestRunnerConfig`].
     pub fn resolve(
         self,
-        env: &napi::Env,
         runtime: runtime::Handle,
     ) -> napi::Result<edr_napi_core::solidity::config::TestRunnerConfig> {
         let SolidityTestRunnerConfigArgs {
@@ -198,7 +242,8 @@ impl SolidityTestRunnerConfigArgs {
             block_difficulty,
             block_gas_limit,
             disable_block_gas_limit,
-            enable_tx_gas_limit_cap,
+            transaction_gas_cap,
+            disable_transaction_gas_cap,
             memory_limit,
             local_predeploys,
             eth_rpc_url,
@@ -213,12 +258,21 @@ impl SolidityTestRunnerConfigArgs {
             include_traces,
             observability,
             test_pattern,
+            exclude_test_pattern,
             generate_gas_report,
             test_function_overrides,
+            eip712_canonical_types,
         } = self;
 
         let test_pattern = TestFilterConfig {
             test_pattern: test_pattern
+                .as_ref()
+                .map(|p| {
+                    p.parse()
+                        .map_err(|error| napi::Error::new(Status::InvalidArg, error))
+                })
+                .transpose()?,
+            exclude_test_pattern: exclude_test_pattern
                 .as_ref()
                 .map(|p| {
                     p.parse()
@@ -294,13 +348,24 @@ impl SolidityTestRunnerConfigArgs {
                 })
                 .transpose()?
                 .unwrap_or_default(),
+            eip712_types_by_name: foundry_cheatcodes::parse_eip712_canonical_types(
+                eip712_canonical_types.unwrap_or_default(),
+            )
+            .map_err(|errors| {
+                let msg = errors
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                napi::Error::new(Status::InvalidArg, msg)
+            })?,
         };
 
         let on_collected_coverage_fn = observability.map_or_else(
             || Ok(None),
             |observability| {
                 observability
-                    .resolve(env, runtime)
+                    .resolve(runtime)
                     .map(|config| config.on_collected_coverage_fn)
             },
         )?;
@@ -324,7 +389,8 @@ impl SolidityTestRunnerConfigArgs {
             block_difficulty: block_difficulty.map(TryCast::try_cast).transpose()?,
             block_gas_limit: block_gas_limit.map(TryCast::try_cast).transpose()?,
             disable_block_gas_limit,
-            enable_tx_gas_limit_cap,
+            transaction_gas_cap: transaction_gas_cap.map(TryCast::try_cast).transpose()?,
+            disable_transaction_gas_cap,
             memory_limit: memory_limit.map(TryCast::try_cast).transpose()?,
             local_predeploys,
             fork_url: eth_rpc_url,
@@ -392,6 +458,9 @@ pub struct FuzzConfigArgs {
     /// The flag indicating whether to include push bytes values.
     /// Defaults to true.
     pub include_push_bytes: Option<bool>,
+    /// Show `console.log` in fuzz test.
+    /// Defaults to false.
+    pub show_logs: Option<bool>,
     /// Optional timeout (in seconds) for each property test.
     /// Defaults to none (no timeout).
     pub timeout: Option<u32>,
@@ -410,6 +479,7 @@ impl TryFrom<FuzzConfigArgs> for FuzzConfig {
             dictionary_weight,
             include_storage,
             include_push_bytes,
+            show_logs,
             timeout,
         } = value;
 
@@ -453,11 +523,15 @@ impl TryFrom<FuzzConfigArgs> for FuzzConfig {
             fuzz.dictionary.include_push_bytes = include_push_bytes;
         }
 
+        if let Some(show_logs) = show_logs {
+            fuzz.show_logs = show_logs;
+        }
+
         Ok(fuzz)
     }
 }
 
-impl SolidityTestRunnerConfigArgs {
+impl SolidityTestRunnerConfigArgs<'_> {
     pub fn try_get_test_filter(&self) -> napi::Result<TestFilterConfig> {
         let test_pattern = self
             .test_pattern
@@ -467,7 +541,18 @@ impl SolidityTestRunnerConfigArgs {
                     .map_err(|e| napi::Error::new(Status::InvalidArg, e))
             })
             .transpose()?;
-        Ok(TestFilterConfig { test_pattern })
+        let exclude_test_pattern = self
+            .exclude_test_pattern
+            .as_ref()
+            .map(|p| {
+                p.parse()
+                    .map_err(|e| napi::Error::new(Status::InvalidArg, e))
+            })
+            .transpose()?;
+        Ok(TestFilterConfig {
+            test_pattern,
+            exclude_test_pattern,
+        })
     }
 }
 
@@ -528,6 +613,7 @@ impl InvariantConfigArgs {
             failure_persist_file: _,
             max_test_rejects: _,
             seed: _,
+            show_logs: _,
             timeout,
         } = fuzz;
 
@@ -677,7 +763,7 @@ impl TryFrom<StorageCachingConfig> for foundry_cheatcodes::StorageCachingConfig 
 
 /// What chains to cache
 #[napi]
-#[derive(Debug, Default, serde::Serialize)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 pub enum CachedChains {
     /// Cache all chains
     #[default]
@@ -697,7 +783,7 @@ impl From<CachedChains> for foundry_cheatcodes::CachedChains {
 
 /// What endpoints to enable caching for
 #[napi]
-#[derive(Debug, Default, serde::Serialize)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 pub enum CachedEndpoints {
     /// Cache all endpoints
     #[default]
@@ -750,7 +836,7 @@ impl From<PathPermission> for foundry_cheatcodes::PathPermission {
  * directory, nor in any subdirectories.
  */
 #[napi]
-#[derive(Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub enum FsAccessPermission {
     /// Allows reading and writing the file
     ReadWriteFile,
@@ -789,7 +875,7 @@ impl From<FsAccessPermission> for foundry_cheatcodes::FsAccessPermission {
 }
 
 #[napi(object)]
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 pub struct AddressLabel {
     /// The address to label
     #[serde(serialize_with = "serialize_uint8array_as_hex")]
@@ -828,7 +914,7 @@ impl From<CollectStackTraces> for edr_solidity_tests::CollectStackTraces {
 /// This can either be for Solidity test results or provider transaction
 /// execution results.
 #[napi]
-#[derive(Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize)]
 pub enum IncludeTraces {
     /// No traces will be included at all.
     #[default]
@@ -867,6 +953,16 @@ pub struct TestFunctionConfigOverride {
     /// Allow expecting reverts with `expectRevert` at the same callstack depth
     /// as the test.
     pub allow_internal_expect_revert: Option<bool>,
+    /// Whether to enable isolation of calls for the test. In isolation mode all
+    /// top-level calls are executed as a separate transaction in a separate
+    /// EVM context, enabling more precise gas accounting and transaction
+    /// state changes.
+    /// Ignored when gas reporting is enabled, as isolation is required for
+    /// accurate gas measurements.
+    pub isolate: Option<bool>,
+    /// The EVM version to use for this test, e.g. "Cancun". This will override
+    /// the global EVM version.
+    pub evm_version: Option<String>,
     /// Configuration override for fuzz testing.
     pub fuzz: Option<FuzzConfigOverride>,
     /// Configuration override for invariant testing.
@@ -877,6 +973,8 @@ impl From<TestFunctionConfigOverride> for edr_solidity_tests::TestFunctionConfig
     fn from(value: TestFunctionConfigOverride) -> Self {
         Self {
             allow_internal_expect_revert: value.allow_internal_expect_revert,
+            isolate: value.isolate,
+            evm_version: value.evm_version,
             fuzz: value.fuzz.map(Into::into),
             invariant: value.invariant.map(Into::into),
         }
