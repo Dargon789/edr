@@ -1,5 +1,65 @@
 # @nomicfoundation/edr
 
+## 0.15.0
+
+### Minor Changes
+
+- ae83f8f: Added support for Solidity stack traces from solx-compiled artifacts.
+
+### Patch Changes
+
+- b5e9399: Fixed empty Solidity test stack trace on failure when running with `CollectStackTraces::Always`.
+- 4822804: Fixed missing Solidity test stack trace when an invariant is already broken at the campaign's initial check and stack traces are collected with `CollectStackTraces::Always`.
+- 48af36f: Added experimental EIP-7843 support: blocks on Amsterdam+ now include the `slotNumber` header field, and the `SLOTNUM` (`0x4b`) opcode returns it. EDR has no consensus layer, so the value is simulated: increments by one per mined block, starting at 0 on local blockchains.
+- 440e770: Fixed solx stack traces misreporting returndata-size mismatches and calls to codeless accounts as generic reverts at the call site, dropping the called function's frame from cross-contract modifier reverts, and — under non-default optimizer modes — reporting modifier reverts at the function declaration line or collapsing bare modifier reverts to `OtherExecutionError` at the contract declaration.
+- 1822e8b: Fixed missing recursion frames in solx stack traces for external self-recursive calls.
+
+## 0.14.2
+
+### Patch Changes
+
+- 51990cc: Added experimental EIP-7928 support: blocks on Amsterdam+ now include the `blockAccessListHash` header field. The value is simulated, not the real `keccak256(rlp(blockAccessList))`. Within a single blockchain it is unique per block, and a block with no state changes uses the empty-list hash `keccak256(rlp([]))` as the EIP specifies; it is not, however, guaranteed to be consistent across provider configurations (e.g. a different hardfork).
+- 57a286f: Added experimental EIP-7778 support: from the Amsterdam hardfork, a block's `gasUsed` excludes gas refunds. Transaction receipts are unchanged.
+
+## 0.14.1
+
+### Patch Changes
+
+- d35fa0e: Fixed JSON-RPC provider call traces omitting event logs
+
+## 0.14.0
+
+### Minor Changes
+
+- cfff1da: Raised the minimum supported Node.js version to 22. Node.js 20 has reached end-of-life and is no longer supported; the package now targets Node.js 22, 24, and 26.
+- 99e2d33: - Changed the `reason`, `counterexample`, and `valueSnapshotGroups` fields on `TestResult` to class getters returning `T | undefined`.
+  - Changed `SuiteResult` from a class to a plain object; field shapes are unchanged.
+  - Changed the `result` field on `SubscriptionEvent` from `any` to `unknown`.
+  - Fixed exceptions thrown by the `decodeConsoleLogInputsCallback` and `printLineCallback` logger callbacks from being swallowed or crashing the process. They now surface as JSON-RPC internal-error responses carrying the JS error message.
+
+### Patch Changes
+
+- 5ad2418: Added experimental support for the Amsterdam hardfork, starting with EIP-7708 (ETH transfers emit logs). It is opt-in and not yet stable, so support is incomplete and its behavior may still change.
+
+## 0.13.0
+
+### Minor Changes
+
+- 6ca30cd: Added a new `excludeTestPattern` option to the Solidity test runner config for negative test name filtering
+
+### Patch Changes
+
+- b59337e: Fixed stack traces for unsupported cheatcode errors not being identified when compiled with `viaIR`.
+
+## 0.12.1
+
+### Patch Changes
+
+- b02d57f: Added the optional `gasEstimationMode` provider configuration that controls the success criteria of `eth_estimateGas`: the default `TopLevelSuccess` preserves the previous behavior, while `NoInternalOutOfGas` returns estimations that also avoid internal calls running out of gas, erroring when no such estimation exists.
+- 6b146a5: Fixed `eth_estimateGas` erroring on Osaka+ when the binary search probed gas values above the EIP-7825 per-transaction cap
+- e43de3e: Added the `logs` field on `RevertResult` and `HaltResult` so logs emitted before a revert or halt are propagated through NAPI
+- e43de3e: Added `daFootPrintGasScalar` field to RPC receipts for OP stack (post-Jovian)
+
 ## 0.12.0
 
 ### Minor Changes
