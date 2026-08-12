@@ -64,6 +64,7 @@ members = [
     "crates/test/mem_pool",
     "crates/test/receipt",
     "crates/test/transaction",
+    "crates/utils/sync",
     "crates/tool/cli",
     "crates/tool/solidity",
     "crates/tool/op_chain_config_generator",
@@ -195,6 +196,7 @@ edr_test_utils = { path = "crates/edr_test_utils" }
 edr_tracing = { path = "crates/tracing" }
 edr_transaction = { path = "crates/edr_transaction" }
 edr_utils = { path = "crates/edr_utils" }
+edr_utils_sync = { path = "crates/utils/sync" }
 
 foundry-cheatcodes = { path = "crates/foundry/cheatcodes" }
 foundry-cheatcodes-spec = { path = "crates/foundry/cheatcodes/spec" }
@@ -321,7 +323,7 @@ chrono = { version = "0.4", default-features = false, features = [
     "clock",
     "std",
 ] }
-clap = { version = "3.2.20", features = ["derive"] }
+clap = { version = "4.0.0", features = ["derive"] }
 ciborium = "0.2"
 color-eyre = "0.6"
 derive_more = { version = "2", default-features = false }
@@ -330,7 +332,7 @@ evm-disassembler = "0.6"
 eyre = "0.6"
 flate2 = "1.1"
 hex = { package = "const-hex", version = "1.6", features = ["hex"] }
-itertools = "0.14"
+itertools = "0.15"
 jsonpath_lib = "0.3"
 k256 = "0.13"
 log = { version = "0.4.17", default-features = false }
@@ -354,7 +356,7 @@ serde_json = { version = "1.0", features = [
     "preserve_order",
     "std",
 ] }
-strum = "0.26"
+strum = "0.28"
 thiserror = { version = "2.0.12", default-features = false }
 toml = "0.9"
 tracing = "0.1"
@@ -376,7 +378,7 @@ walkdir = "2"
 hyper = "1.0"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 tower = "0.5"
-tower-http = "0.6"
+tower-http = "0.7"
 axum = "0.8"
 
 [workspace.lints.rust]
@@ -415,6 +417,7 @@ inefficient_to_string = "warn"
 invalid_upcast_comparisons = "warn"
 items-after-statements = "warn"
 large_digit_groups = "warn"
+large_futures = "warn"
 large_stack_arrays = "warn"
 large_types_passed_by_value = "warn"
 let_unit_value = "warn"
